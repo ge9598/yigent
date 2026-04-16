@@ -1,0 +1,77 @@
+# Eval Benchmark Task Definitions
+# 4 domains × 3 difficulty levels
+
+coding:
+  - task: "Write a Python function that implements quicksort and include 3 test cases."
+    check: code_executes
+    difficulty: easy
+    timeout: 120
+
+  - task: "Read the file src/core/agent_loop.py and refactor it to extract the tool execution logic into a separate method."
+    check: refactor_quality
+    difficulty: medium
+    timeout: 180
+
+  - task: "The following Python script raises an IndexError on line 15. Debug and fix it: [provide test script]"
+    check: bug_fixed
+    difficulty: hard
+    timeout: 240
+
+research:
+  - task: "Summarize the three main RAG architectures (Naive, Advanced, Modular) and their trade-offs in a structured format."
+    check: content_quality
+    difficulty: medium
+    timeout: 120
+
+  - task: "Compare vLLM and SGLang in terms of throughput, latency, memory efficiency, and supported features. Include specific numbers where possible."
+    check: comparison_completeness
+    difficulty: hard
+    timeout: 180
+
+data_analysis:
+  - task: "Analyze the distribution of the provided CSV file. Report mean, median, std for each numeric column and generate a summary."
+    check: has_statistics
+    difficulty: easy
+    timeout: 120
+    setup: "create a sample CSV with 5 columns and 100 rows"
+
+  - task: "Find anomalies in the provided dataset. An anomaly is any value more than 3 standard deviations from the column mean. List them and suggest possible causes."
+    check: anomaly_detected
+    difficulty: hard
+    timeout: 180
+    setup: "create a sample CSV with injected anomalies"
+
+file_management:
+  - task: "Organize all files in the test_workspace/ directory by file extension into subdirectories (e.g., py/, txt/, md/)."
+    check: files_organized
+    difficulty: easy
+    timeout: 60
+    setup: "create test_workspace/ with 20 mixed files"
+
+  - task: "Search all .log files in test_workspace/ for lines containing 'ERROR'. Produce a summary with filename, line number, and error message."
+    check: errors_found
+    difficulty: medium
+    timeout: 120
+    setup: "create test_workspace/ with 5 log files containing mixed log levels"
+
+# Scoring weights
+scoring:
+  rule_check_weight: 0.4
+  llm_judge_weight: 0.6
+  
+# LLM-as-Judge prompt template
+judge_prompt: |
+  You are evaluating an AI agent's performance on a task.
+  
+  Task: {task_description}
+  Expected outcome: {expected_check}
+  
+  Agent's execution trace:
+  {execution_trace}
+  
+  Score the agent on:
+  1. Correctness (0-10): Did it achieve the goal?
+  2. Efficiency (0-10): Did it use a reasonable number of steps?
+  3. Robustness (0-10): Did it handle errors gracefully?
+  
+  Return JSON: {"correctness": N, "efficiency": N, "robustness": N, "reasoning": "..."}

@@ -1,0 +1,103 @@
+# Yigent Harness — Default Configuration
+# Copy to configs/local.yaml and edit with your API keys.
+# local.yaml is gitignored; default.yaml is checked in.
+
+provider:
+  # Primary provider
+  name: deepseek
+  api_key: "${DEEPSEEK_API_KEY}"  # or set env var
+  base_url: "https://api.deepseek.com/v1"
+  model: "deepseek-chat"
+  
+  # Fallback provider (optional)
+  fallback:
+    name: openai_compat
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "https://api.openai.com/v1"
+    model: "gpt-4o-mini"
+
+  # Auxiliary LLM for compression, nudge, skill creation (cheaper model)
+  auxiliary:
+    name: deepseek
+    model: "deepseek-chat"
+
+agent:
+  max_iterations: 90        # IterationBudget total (shared across parent + children)
+  nudge_interval: 15         # Periodic nudge every N tool calls
+  fork_budget_allocation: 20 # Max iterations allocated to a single Fork
+
+context:
+  # Dynamic thresholds (computed from model context window)
+  # model_context_window is auto-detected from provider metadata
+  output_reserve: 20000      # Tokens reserved for model output
+  buffer: 13000              # Safety buffer
+  # Compression circuit breaker
+  max_compression_failures: 3
+
+plan_mode:
+  save_dir: "plans/"
+  auto_trigger_complexity: "complex"  # Router triggers plan mode for complex tasks
+
+tools:
+  # Deferred tools (not in initial tool list, discovered via ToolSearch)
+  deferred:
+    - enter_plan_mode
+  # Tool timeouts (seconds)
+  timeouts:
+    bash: 60
+    python_repl: 30
+    web_search: 15
+    default: 30
+
+memory:
+  # L1 Episodic
+  sqlite_path: "data/sessions.db"
+  # L2 Semantic (optional — set enabled: false to skip Qdrant dependency)
+  semantic:
+    enabled: false
+    qdrant_host: "localhost"
+    qdrant_port: 6333
+    collection: "agent_memory"
+
+learning:
+  skills_dir: "skills/"
+  trajectories_dir: "trajectories/"
+  auto_create_skills: true
+  auto_improve_skills: true
+  trajectory_recording: true  # Always-on
+
+eval:
+  tasks_file: "configs/eval_tasks.yaml"
+  results_dir: "benchmarks/"
+
+hooks:
+  # Example hooks — customize in configs/hooks.yaml
+  # pre_tool_use:
+  #   - "scripts/check_dangerous_commands.sh"
+  # post_tool_use:
+  #   - "scripts/run_linter.sh"
+
+permissions:
+  # Permission levels
+  auto_allow:
+    - read_file
+    - list_dir
+    - search_files
+    - web_search
+    - tool_search
+  require_approval:
+    - write_file
+    - edit_file
+    - bash
+    - python_repl
+  always_block:
+    - delete_file  # Must be unblocked explicitly
+
+  # YOLO mode (auto-approve with shadow classifier)
+  yolo_mode: false
+
+ui:
+  # CLI settings
+  streaming: true
+  show_tool_calls: true
+  show_permission_prompts: true

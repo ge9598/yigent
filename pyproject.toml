@@ -1,0 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "universal-agent"
+version = "0.1.0"
+description = "General-purpose agent harness with streaming execution, Plan mode, self-improving skills, and generalization benchmark"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+
+dependencies = [
+    # LLM providers
+    "openai>=1.40.0",          # OpenAI-compatible API client (works for DeepSeek too)
+    "httpx>=0.27.0",           # Async HTTP client
+    
+    # CLI
+    "rich>=13.7.0",            # Terminal UI (panels, tables, spinners, markdown)
+    "prompt-toolkit>=3.0.0",   # Input with autocomplete
+    
+    # API server
+    "fastapi>=0.111.0",
+    "uvicorn>=0.30.0",
+    "sse-starlette>=2.0.0",   # Server-sent events
+    
+    # Memory
+    "aiosqlite>=0.20.0",       # Async SQLite (L1 episodic)
+    
+    # Config
+    "pyyaml>=6.0",
+    "pydantic>=2.7.0",         # Schema validation for tool calls
+    
+    # Utilities
+    "tiktoken>=0.7.0",         # Token counting
+]
+
+[project.optional-dependencies]
+semantic = [
+    "qdrant-client>=1.9.0",    # L2 semantic memory (optional)
+    "sentence-transformers>=3.0.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.5.0",             # Linter + formatter
+]
+all = ["universal-agent[semantic,dev]"]
+
+[project.scripts]
+agent = "src.ui.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

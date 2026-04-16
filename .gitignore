@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Local config with API keys
+configs/local.yaml
+
+# Runtime data
+data/
+plans/
+trajectories/
+benchmarks/
+skills/*.md
+!skills/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
