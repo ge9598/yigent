@@ -17,10 +17,11 @@ class IterationBudget:
     the parent — the parent already paid upfront.
     """
 
-    def __init__(self, total: int = 90) -> None:
+    def __init__(self, total: int = 90, enable_warning: bool = True) -> None:
         self._total = total
         self._spent = 0
         self._lock = asyncio.Lock()
+        self._enable_warning = enable_warning
 
     # -- properties ----------------------------------------------------------
 
@@ -34,7 +35,9 @@ class IterationBudget:
 
     @property
     def is_warning(self) -> bool:
-        """True when remaining <= 20% of total (but not exhausted)."""
+        """True when remaining <= 20% of total (but not exhausted) and warning is enabled."""
+        if not self._enable_warning:
+            return False
         if self._total == 0:
             return False
         return 0 < self.remaining <= self._total * 0.2
@@ -44,6 +47,14 @@ class IterationBudget:
         return self.remaining <= 0
 
     # -- mutations -----------------------------------------------------------
+
+    async def try_consume(self, n: int = 1) -> bool:
+        """Soft consume: returns True if successful, False if budget exhausted."""
+        async with self._lock:
+            if self._spent + n > self._total:
+                return False
+            self._spent += n
+            return True
 
     async def consume(self, n: int = 1) -> int:
         """Consume *n* iterations. Returns remaining. Raises on exhaustion."""
