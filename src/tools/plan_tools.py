@@ -56,45 +56,26 @@ register(ToolDefinition(
 # exit_plan_mode
 # ---------------------------------------------------------------------------
 
-async def _exit_plan_mode_handler(
-    ctx: ToolContext,
-    approved: bool = False,
-    plan_content: str = "",
-) -> str:
+async def _exit_plan_mode_handler(ctx: ToolContext) -> str:
     if not ctx.plan_mode.is_active:
         return "Error: plan mode is not active."
-    return ctx.plan_mode.exit(approved=approved, plan_content=plan_content)
+    return ctx.plan_mode.exit()
 
 
 register(ToolDefinition(
     name="exit_plan_mode",
     description=(
-        "Exit plan mode. If approved=True and plan_content is provided, the plan "
-        "is saved to plans/. Otherwise the plan is discarded."
+        "Exit plan mode. Any plan content buffered via plan_mode.append() is "
+        "automatically saved to plans/. Takes no parameters."
     ),
     handler=_exit_plan_mode_handler,
     schema=ToolSchema(
         name="exit_plan_mode",
         description=(
-            "Exit plan mode. Set approved=true to save the plan and resume normal "
-            "execution. Provide the full plan as plan_content when approving."
+            "Exit plan mode and resume normal execution. If the agent buffered "
+            "plan content during planning, it is auto-saved to plans/."
         ),
-        parameters={
-            "type": "object",
-            "properties": {
-                "approved": {
-                    "type": "boolean",
-                    "description": "Whether the user has approved the plan.",
-                    "default": False,
-                },
-                "plan_content": {
-                    "type": "string",
-                    "description": "Full plan text in markdown.",
-                    "default": "",
-                },
-            },
-            "required": [],
-        },
+        parameters={"type": "object", "properties": {}, "required": []},
         # WRITE permission but the plan_mode whitelist exempts it from blocking.
         permission_level=PermissionLevel.WRITE,
         timeout=10,

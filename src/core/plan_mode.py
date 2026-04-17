@@ -30,6 +30,7 @@ class PlanMode:
         self._session_id: str | None = None
         self._entered_at: dt.datetime | None = None
         self._save_dir = Path(save_dir)
+        self._plan_buffer: str = ""
 
     # ------------------------------------------------------------------
     # State
@@ -52,9 +53,18 @@ class PlanMode:
         self._active = True
         self._session_id = session_id
         self._entered_at = dt.datetime.now()
+        self._plan_buffer = ""
 
-    def exit(self, approved: bool, plan_content: str = "") -> str:
-        """Deactivate. If approved and content provided, save to ``plans/``.
+    def append(self, content: str) -> None:
+        """Append content to the internal plan buffer."""
+        self._plan_buffer += content
+
+    def get_plan_content(self) -> str:
+        """Return the current plan buffer."""
+        return self._plan_buffer
+
+    def exit(self) -> str:
+        """Deactivate plan mode. Auto-saves buffer to file if it has content.
 
         Returns a human-readable result message.
         """
@@ -63,15 +73,15 @@ class PlanMode:
 
         session_id = self._session_id or "unknown"
         entered_at = self._entered_at
+        plan_content = self._plan_buffer
+
         self._active = False
         self._session_id = None
         self._entered_at = None
-
-        if not approved:
-            return "Plan discarded. Plan mode deactivated."
+        self._plan_buffer = ""
 
         if not plan_content.strip():
-            return "Plan approved but no content to save. Plan mode deactivated."
+            return "Plan mode deactivated."
 
         self._save_dir.mkdir(parents=True, exist_ok=True)
         ts = (entered_at or dt.datetime.now()).strftime("%Y%m%d_%H%M%S")
@@ -83,7 +93,7 @@ class PlanMode:
             f"---\n\n"
         )
         path.write_text(header + plan_content, encoding="utf-8")
-        return f"Plan approved and saved to {path}. Plan mode deactivated."
+        return f"Plan saved to {path}. Plan mode deactivated."
 
     # ------------------------------------------------------------------
     # Permission enforcement
