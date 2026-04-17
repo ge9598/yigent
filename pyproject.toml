@@ -2,8 +2,11 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
 [project]
-name = "universal-agent"
+name = "yigent"
 version = "0.1.0"
 description = "General-purpose agent harness with streaming execution, Plan mode, self-improving skills, and generalization benchmark"
 readme = "README.md"
