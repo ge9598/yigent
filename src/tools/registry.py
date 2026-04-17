@@ -100,24 +100,68 @@ class ToolRegistry:
     # ToolSearch — the discovery mechanism
     # ------------------------------------------------------------------
 
-    def tool_search(self, query: str, limit: int = 10) -> list[ToolSchema]:
-        """Fuzzy-match ``query`` against tool names + descriptions.
+    def tool_search(self, query: str, limit: int = 5) -> list[ToolSchema]:
+        """Search tools by keyword with weighted scoring or exact ``select:`` syntax.
+
+        Two modes:
+
+        **select: syntax** — ``"select:write_file,enter_plan_mode"``
+            Exact name lookup for the comma-separated list. Unknown names are
+            silently skipped. Activates all matched tools.
+
+        **Weighted scoring** — any other query string
+            Scores each tool and returns the top ``limit`` (default 5):
+
+            * +10  exact name match (case-insensitive)
+            * +5   query is a substring of the tool name
+            * +2   query is a substring of the tool description
+
+            Results are sorted by score descending. Matched tools are activated.
 
         Matched tools are activated (schemas become available to the LLM
-        via ``get_active_schemas()``). Case-insensitive substring match.
+        via ``get_active_schemas()``).
         """
-        q = query.lower().strip()
+        q = query.strip()
         if not q:
             return []
 
-        matches: list[ToolSchema] = []
+        # ------------------------------------------------------------------
+        # select: exact-name path
+        # ------------------------------------------------------------------
+        if q.startswith("select:"):
+            names = [n.strip() for n in q[len("select:"):].split(",") if n.strip()]
+            results: list[ToolSchema] = []
+            for name in names:
+                t = self._tools.get(name)
+                if t is not None:
+                    self._activated.add(name)
+                    results.append(t.schema)
+            return results
+
+        # ------------------------------------------------------------------
+        # Weighted scoring path
+        # ------------------------------------------------------------------
+        ql = q.lower()
+        scored: list[tuple[int, ToolSchema]] = []
         for t in self._tools.values():
-            if q in t.name.lower() or q in t.description.lower():
-                self._activated.add(t.name)
-                matches.append(t.schema)
-                if len(matches) >= limit:
-                    break
-        return matches
+            name_lower = t.name.lower()
+            score = 0
+            if ql == name_lower:
+                score += 10
+            elif ql in name_lower:
+                score += 5
+            if ql in t.description.lower():
+                score += 2
+            if score > 0:
+                scored.append((score, t.schema))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:limit]
+
+        for _, schema in top:
+            self._activated.add(schema.name)
+
+        return [schema for _, schema in top]
 
 
 # ---------------------------------------------------------------------------
