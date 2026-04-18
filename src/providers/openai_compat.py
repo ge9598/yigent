@@ -38,6 +38,7 @@ class OpenAICompatProvider(LLMProvider):
         base_url: str = "https://api.openai.com/v1",
         model: str = "gpt-4o-mini",
         default_timeout: float = 120.0,
+        debug: bool = False,
     ) -> None:
         self._client = AsyncOpenAI(
             api_key=api_key,
@@ -45,6 +46,7 @@ class OpenAICompatProvider(LLMProvider):
             timeout=default_timeout,
         )
         self._default_model = model
+        self._debug = debug
 
     # -- public interface ----------------------------------------------------
 
@@ -62,9 +64,22 @@ class OpenAICompatProvider(LLMProvider):
             "messages": messages,  # type: ignore[arg-type]
             "temperature": temperature,
             "stream": True,
+            "max_tokens": 4096,
         }
         if tools:
             kwargs["tools"] = [t.to_openai_tool() for t in tools]
+
+        if self._debug:
+            logger.warning(
+                "REQUEST model=%s messages=%d tools=%d",
+                kwargs.get("model"),
+                len(kwargs.get("messages", [])),
+                len(kwargs.get("tools", []) or []),
+            )
+            for i, m in enumerate(kwargs.get("messages", [])):
+                role = m.get("role", "?")
+                content = (m.get("content") or "")[:100]
+                logger.warning("  msg[%d] role=%s content=%s...", i, role, content)
 
         stream = await self._client.chat.completions.create(**kwargs)
 

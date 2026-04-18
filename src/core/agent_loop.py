@@ -178,11 +178,11 @@ def _assemble_messages(
             f"\n\nAdditional tools available via tool_search: {', '.join(deferred_names)}"
         )
 
-    messages.append(Message(role="system", content=sys_content))
-
-    # Environment context
+    # Merge environment into system prompt (some providers reject multiple system messages)
     if env_text:
-        messages.append(Message(role="system", content=f"[Environment]\n{env_text}"))
+        sys_content += f"\n\n[Environment]\n{env_text}"
+
+    messages.append(Message(role="system", content=sys_content))
 
     # Conversation history
     messages.extend(conversation)
