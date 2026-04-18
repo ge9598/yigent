@@ -102,6 +102,7 @@ class UISection(BaseModel):
     streaming: bool = True
     show_tool_calls: bool = True
     show_permission_prompts: bool = True
+    debug: bool = False
 
 
 class SearchSection(BaseModel):

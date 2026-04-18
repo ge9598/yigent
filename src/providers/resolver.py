@@ -21,7 +21,8 @@ _PROVIDER_REGISTRY: dict[str, type[LLMProvider]] = {
 }
 
 
-def _build_provider(name: str, api_key: str, base_url: str, model: str) -> LLMProvider:
+def _build_provider(name: str, api_key: str, base_url: str, model: str,
+                    debug: bool = False) -> LLMProvider:
     cls = _PROVIDER_REGISTRY.get(name)
     if cls is None:
         raise ValueError(
@@ -29,7 +30,7 @@ def _build_provider(name: str, api_key: str, base_url: str, model: str) -> LLMPr
         )
     if not api_key:
         raise ValueError(f"Provider '{name}' requires an API key")
-    return cls(api_key=api_key, base_url=base_url, model=model)
+    return cls(api_key=api_key, base_url=base_url, model=model, debug=debug)
 
 
 def resolve_provider(config: AgentConfig) -> LLMProvider:
@@ -39,12 +40,15 @@ def resolve_provider(config: AgentConfig) -> LLMProvider:
     """
     section = config.provider
 
+    debug = config.ui.debug
+
     try:
         return _build_provider(
             name=section.name,
             api_key=section.api_key,
             base_url=section.base_url,
             model=section.model,
+            debug=debug,
         )
     except (ValueError, Exception) as exc:
         if section.fallback is None:

@@ -14,10 +14,12 @@ class DeepSeekProvider(OpenAICompatProvider):
         base_url: str = "https://api.deepseek.com/v1",
         model: str = "deepseek-chat",
         default_timeout: float = 120.0,
+        debug: bool = False,
     ) -> None:
         super().__init__(
             api_key=api_key,
             base_url=base_url,
             model=model,
             default_timeout=default_timeout,
+            debug=debug,
         )
