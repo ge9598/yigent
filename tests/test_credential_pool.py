@@ -124,3 +124,65 @@ def test_mark_error_on_unknown_key_is_noop():
     # Should not raise, should not affect state
     pool.mark_error("never_added", status=429)
     assert pool.acquire() == "k1"
+
+
+def test_config_accepts_keys_list():
+    from src.core.config import ProviderConfig
+
+    cfg = ProviderConfig.model_validate({
+        "name": "deepseek",
+        "keys": ["sk-a", "sk-b"],
+        "strategy": "round_robin",
+        "cooldown_seconds": 30,
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+    })
+    assert cfg.keys == ["sk-a", "sk-b"]
+    assert cfg.strategy == "round_robin"
+    assert cfg.cooldown_seconds == 30
+    assert cfg.effective_keys() == ["sk-a", "sk-b"]
+
+
+def test_config_api_key_backward_compat():
+    from src.core.config import ProviderConfig
+
+    cfg = ProviderConfig.model_validate({
+        "name": "deepseek",
+        "api_key": "sk-legacy",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+    })
+    assert cfg.api_key == "sk-legacy"
+    assert cfg.keys == []
+    assert cfg.strategy == "round_robin"
+    assert cfg.cooldown_seconds == 60.0
+    assert cfg.effective_keys() == ["sk-legacy"]
+
+
+def test_config_keys_takes_precedence_over_api_key():
+    """When both are set, keys: wins."""
+    from src.core.config import ProviderConfig
+
+    cfg = ProviderConfig.model_validate({
+        "name": "deepseek",
+        "api_key": "sk-old",
+        "keys": ["sk-new-a", "sk-new-b"],
+        "base_url": "x",
+        "model": "m",
+    })
+    assert cfg.effective_keys() == ["sk-new-a", "sk-new-b"]
+
+
+def test_provider_section_effective_keys():
+    from src.core.config import ProviderSection
+
+    section = ProviderSection.model_validate({
+        "name": "deepseek",
+        "keys": ["sk-a", "sk-b", "sk-c"],
+        "strategy": "fill_first",
+        "cooldown_seconds": 120,
+        "base_url": "x",
+        "model": "m",
+    })
+    assert section.effective_keys() == ["sk-a", "sk-b", "sk-c"]
+    assert section.strategy == "fill_first"

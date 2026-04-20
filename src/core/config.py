@@ -18,17 +18,37 @@ from pydantic import BaseModel, Field, model_validator
 class ProviderConfig(BaseModel):
     name: str = "deepseek"
     api_key: str = ""
+    keys: list[str] = Field(default_factory=list)
+    strategy: str = "round_robin"
+    cooldown_seconds: float = 60.0
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-chat"
+
+    def effective_keys(self) -> list[str]:
+        if self.keys:
+            return list(self.keys)
+        if self.api_key:
+            return [self.api_key]
+        return []
 
 
 class ProviderSection(BaseModel):
     name: str = "deepseek"
     api_key: str = ""
+    keys: list[str] = Field(default_factory=list)
+    strategy: str = "round_robin"
+    cooldown_seconds: float = 60.0
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-chat"
     fallback: ProviderConfig | None = None
     auxiliary: ProviderConfig | None = None
+
+    def effective_keys(self) -> list[str]:
+        if self.keys:
+            return list(self.keys)
+        if self.api_key:
+            return [self.api_key]
+        return []
 
 
 class AgentSection(BaseModel):
