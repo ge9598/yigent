@@ -67,7 +67,7 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 
 ### Provider-layer hardening
 
-- [ ] Credential pool with rotation strategy (Hermes pattern) — `keys: [...]` + `strategy: round_robin/fill_first/least_used/random` + 429/402/401 auto-rotate
+- [x] Credential pool with rotation strategy (Hermes pattern) — `keys: [...]` + `strategy: round_robin/fill_first/least_used/random` + 429/cooldown auto-rotate
 - [ ] Scenario routing (CCR pattern) — `routes: {default, background, long_context, thinking}` + per-task-type provider/model selection
 
 ### Multi-agent + router + MCP
@@ -111,6 +111,7 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 | + Phase 2a Unit 4 (provider hardening) | 150 |
 | + validate→ValidateResult + ctx | 156 |
 | + markdown memory + memory tools + slash | 169 |
+| + Phase 2b Unit 1 (credential pool) | 197 |
 
 ## Current focus
 

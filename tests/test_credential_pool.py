@@ -371,3 +371,56 @@ async def test_anthropic_provider_without_pool_builds_client_eagerly(monkeypatch
     assert init_count[0] == 1
     assert provider._client is not None
     assert provider._credential_pool is None
+
+
+def test_resolver_builds_pool_when_keys_list_present():
+    from src.core.config import AgentConfig, ProviderSection
+    from src.providers.resolver import resolve_provider
+
+    cfg = AgentConfig(
+        provider=ProviderSection(
+            name="openai_compat",
+            keys=["sk-a", "sk-b", "sk-c"],
+            strategy="fill_first",
+            cooldown_seconds=30,
+            base_url="https://example.test/v1",
+            model="test-model",
+        )
+    )
+    provider = resolve_provider(cfg)
+    assert provider._credential_pool is not None
+    assert provider._credential_pool.list_keys() == ["sk-a", "sk-b", "sk-c"]
+
+
+def test_resolver_single_key_path_unchanged():
+    from src.core.config import AgentConfig, ProviderSection
+    from src.providers.resolver import resolve_provider
+
+    cfg = AgentConfig(
+        provider=ProviderSection(
+            name="openai_compat",
+            api_key="sk-only",
+            base_url="https://example.test/v1",
+            model="test-model",
+        )
+    )
+    provider = resolve_provider(cfg)
+    assert provider._credential_pool is None
+
+
+def test_resolver_api_key_as_single_item_list_does_not_build_pool():
+    """If keys: [one] is given, effective_keys returns 1 entry → no pool."""
+    from src.core.config import AgentConfig, ProviderSection
+    from src.providers.resolver import resolve_provider
+
+    cfg = AgentConfig(
+        provider=ProviderSection(
+            name="openai_compat",
+            keys=["sk-solo"],
+            base_url="https://example.test/v1",
+            model="test-model",
+        )
+    )
+    provider = resolve_provider(cfg)
+    # Only 1 key: no pool needed, fall through to single-key path
+    assert provider._credential_pool is None
