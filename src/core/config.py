@@ -25,6 +25,7 @@ class ProviderConfig(BaseModel):
     model: str = "deepseek-chat"
 
     def effective_keys(self) -> list[str]:
+        """Return the key list. ``keys`` wins over ``api_key`` when both are set."""
         if self.keys:
             return list(self.keys)
         if self.api_key:
@@ -44,6 +45,7 @@ class ProviderSection(BaseModel):
     auxiliary: ProviderConfig | None = None
 
     def effective_keys(self) -> list[str]:
+        """Return the key list. ``keys`` wins over ``api_key`` when both are set."""
         if self.keys:
             return list(self.keys)
         if self.api_key:
