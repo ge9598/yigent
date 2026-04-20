@@ -75,6 +75,8 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 - [ ] `src/core/capability_router.py` — intent classification + strategy selection
 - [ ] `src/core/multi_agent.py` — Fork (shared cache), Subagent (independent), TaskBoard (in-memory dict + asyncio.Lock)
 - [x] `src/tools/mcp_adapter.py` — MCP stdio + SSE transport + dynamic ToolSchema conversion
+  - **Follow-up (safety):** all MCP tools currently default to `READ_ONLY` permission. Write/execute MCP tools bypass the gate. Fix via config field `MCPServerConfig.default_permission` or a heuristic over tool name. Tracked for Phase 2b polish or Phase 3.
+  - **Follow-up (routing):** `EnvironmentInjector.detect_task_type` returns `coding`/`data_analysis`/`file_ops`/`research` — none overlap with CCR route keys (`default`/`background`/`long_context`/`thinking`), so only `default` fires today. Reconcile vocabularies before the scenario router is exercised in real workloads.
 - [ ] `src/memory/skill_index.py` — skill registry + matching (waits for skill_creator in Phase 3)
 
 ## Phase 3: Learning + eval + polish (Week 3)
