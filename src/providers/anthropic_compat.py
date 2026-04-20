@@ -18,13 +18,16 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from anthropic import AsyncAnthropic
 
 from src.core.types import Message, StreamChunk, ToolCall, ToolCallDict, ToolSchema
 
 from .base import LLMProvider
+
+if TYPE_CHECKING:
+    from .credential_pool import CredentialPool
 
 logger = logging.getLogger(__name__)
 
@@ -49,15 +52,23 @@ class AnthropicCompatProvider(LLMProvider):
         default_timeout: float = 120.0,
         max_tokens: int = 4096,
         debug: bool = False,
+        credential_pool: "CredentialPool | None" = None,
     ) -> None:
-        self._client = AsyncAnthropic(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=default_timeout,
-        )
+        self._base_url = base_url
+        self._fallback_key = api_key
+        self._credential_pool = credential_pool
+        self._default_timeout = default_timeout
         self._default_model = model
         self._max_tokens = max_tokens
         self._debug = debug
+        if credential_pool is None:
+            self._client = AsyncAnthropic(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=default_timeout,
+            )
+        else:
+            self._client = None  # type: ignore[assignment]
 
     # -- public interface ----------------------------------------------------
 
@@ -107,76 +118,95 @@ class AnthropicCompatProvider(LLMProvider):
         stop_reason: str | None = None
         had_tools = False
 
-        async with self._client.messages.stream(**kwargs) as stream:
-            async for event in stream:
-                etype = getattr(event, "type", None)
+        if self._credential_pool is not None:
+            key = self._credential_pool.acquire()
+            client = AsyncAnthropic(
+                api_key=key,
+                base_url=self._base_url,
+                timeout=self._default_timeout,
+            )
+        else:
+            key = self._fallback_key
+            client = self._client  # type: ignore[assignment]
 
-                if etype == "content_block_start":
-                    block = event.content_block
-                    if getattr(block, "type", None) == "tool_use":
-                        had_tools = True
-                        idx = event.index
-                        tool_id = block.id
-                        index_to_id[idx] = tool_id
-                        acc = _ToolUseAccumulator(
-                            index=idx, id=tool_id, name=block.name,
-                        )
-                        accumulators[tool_id] = acc
-                        yield StreamChunk(
-                            type="tool_call_start",
-                            data={"id": acc.id, "name": acc.name},
-                            model=model,
-                        )
+        try:
+            async with client.messages.stream(**kwargs) as stream:
+                async for event in stream:
+                    etype = getattr(event, "type", None)
 
-                elif etype == "content_block_delta":
-                    delta = event.delta
-                    dtype = getattr(delta, "type", None)
-                    if dtype == "text_delta":
-                        yield StreamChunk(type="token", data=delta.text, model=model)
-                    elif dtype == "input_json_delta":
-                        idx = event.index
-                        tool_id = index_to_id.get(idx)
-                        if tool_id is None:
-                            # Defensive: a delta arrived before the matching
-                            # start event. Skip — there's nothing to merge into.
-                            logger.debug(
-                                "input_json_delta with no prior start (index=%d)", idx,
+                    if etype == "content_block_start":
+                        block = event.content_block
+                        if getattr(block, "type", None) == "tool_use":
+                            had_tools = True
+                            idx = event.index
+                            tool_id = block.id
+                            index_to_id[idx] = tool_id
+                            acc = _ToolUseAccumulator(
+                                index=idx, id=tool_id, name=block.name,
                             )
-                            continue
-                        acc = accumulators.get(tool_id)
-                        if acc is not None:
-                            acc.arguments_buffer += delta.partial_json
+                            accumulators[tool_id] = acc
                             yield StreamChunk(
-                                type="tool_call_delta",
-                                data={"id": acc.id, "fragment": delta.partial_json},
+                                type="tool_call_start",
+                                data={"id": acc.id, "name": acc.name},
                                 model=model,
                             )
 
-                elif etype == "content_block_stop":
-                    # Emit tool_call_complete as soon as a block closes,
-                    # rather than waiting for the whole message to end. Better
-                    # streaming UX with multiple tool calls per turn.
-                    idx = getattr(event, "index", None)
-                    if idx is None:
-                        continue
-                    tool_id = index_to_id.get(idx)
-                    if tool_id is None or tool_id in emitted:
-                        continue
-                    acc = accumulators.get(tool_id)
-                    if acc is not None:
-                        emitted.add(tool_id)
-                        yield StreamChunk(
-                            type="tool_call_complete",
-                            data=self._parse_accumulated(acc),
-                            model=model,
-                        )
+                    elif etype == "content_block_delta":
+                        delta = event.delta
+                        dtype = getattr(delta, "type", None)
+                        if dtype == "text_delta":
+                            yield StreamChunk(type="token", data=delta.text, model=model)
+                        elif dtype == "input_json_delta":
+                            idx = event.index
+                            tool_id = index_to_id.get(idx)
+                            if tool_id is None:
+                                # Defensive: a delta arrived before the matching
+                                # start event. Skip — there's nothing to merge into.
+                                logger.debug(
+                                    "input_json_delta with no prior start (index=%d)", idx,
+                                )
+                                continue
+                            acc = accumulators.get(tool_id)
+                            if acc is not None:
+                                acc.arguments_buffer += delta.partial_json
+                                yield StreamChunk(
+                                    type="tool_call_delta",
+                                    data={"id": acc.id, "fragment": delta.partial_json},
+                                    model=model,
+                                )
 
-                elif etype == "message_delta":
-                    # Anthropic's message_delta carries stop_reason when the
-                    # response ends. Record and emit after the stream closes.
-                    reason = getattr(event.delta, "stop_reason", None)
-                    if reason:
-                        stop_reason = reason
+                    elif etype == "content_block_stop":
+                        # Emit tool_call_complete as soon as a block closes,
+                        # rather than waiting for the whole message to end. Better
+                        # streaming UX with multiple tool calls per turn.
+                        idx = getattr(event, "index", None)
+                        if idx is None:
+                            continue
+                        tool_id = index_to_id.get(idx)
+                        if tool_id is None or tool_id in emitted:
+                            continue
+                        acc = accumulators.get(tool_id)
+                        if acc is not None:
+                            emitted.add(tool_id)
+                            yield StreamChunk(
+                                type="tool_call_complete",
+                                data=self._parse_accumulated(acc),
+                                model=model,
+                            )
+
+                    elif etype == "message_delta":
+                        # Anthropic's message_delta carries stop_reason when the
+                        # response ends. Record and emit after the stream closes.
+                        reason = getattr(event.delta, "stop_reason", None)
+                        if reason:
+                            stop_reason = reason
+        except Exception as exc:
+            if self._credential_pool is not None:
+                status = getattr(exc, "status_code", None) or getattr(
+                    getattr(exc, "response", None), "status_code", None
+                )
+                self._credential_pool.mark_error(key, status=status)
+            raise
 
         # Defensive: emit any tool blocks that did not receive an explicit
         # content_block_stop (some endpoints omit it). Preserve insertion

@@ -318,3 +318,56 @@ async def test_openai_provider_marks_429_on_http_error(monkeypatch):
 
     # k1 should be cooling now; next acquire returns k2
     assert pool.acquire() == "k2"
+
+
+def test_deepseek_provider_accepts_credential_pool():
+    """Smoke test: DeepSeekProvider forwards credential_pool to the base."""
+    from src.providers.credential_pool import CredentialPool
+    from src.providers.deepseek import DeepSeekProvider
+
+    pool = CredentialPool(keys=["k1", "k2"], strategy="round_robin")
+    provider = DeepSeekProvider(
+        api_key="fallback",
+        base_url="https://example.test/v1",
+        model="deepseek-chat",
+        credential_pool=pool,
+    )
+    assert provider._credential_pool is pool
+
+
+def test_anthropic_provider_accepts_credential_pool():
+    """Smoke test: AnthropicCompatProvider stores credential_pool."""
+    from src.providers.anthropic_compat import AnthropicCompatProvider
+    from src.providers.credential_pool import CredentialPool
+
+    pool = CredentialPool(keys=["k1", "k2"], strategy="round_robin")
+    provider = AnthropicCompatProvider(
+        api_key="fallback",
+        base_url="https://example.test",
+        model="claude-sonnet-4-5",
+        credential_pool=pool,
+    )
+    assert provider._credential_pool is pool
+
+
+@pytest.mark.asyncio
+async def test_anthropic_provider_without_pool_builds_client_eagerly(monkeypatch):
+    """No pool → client is created at __init__ and reused."""
+    from src.providers.anthropic_compat import AnthropicCompatProvider
+
+    init_count = [0]
+
+    class _FakeClient:
+        def __init__(self, api_key, **kwargs):
+            init_count[0] += 1
+
+    monkeypatch.setattr("src.providers.anthropic_compat.AsyncAnthropic", _FakeClient)
+
+    provider = AnthropicCompatProvider(
+        api_key="sk-only",
+        base_url="https://example.test",
+        model="claude-sonnet-4-5",
+    )
+    assert init_count[0] == 1
+    assert provider._client is not None
+    assert provider._credential_pool is None
