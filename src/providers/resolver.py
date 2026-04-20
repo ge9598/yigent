@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from .anthropic_compat import AnthropicCompatProvider
 from .deepseek import DeepSeekProvider
 from .openai_compat import OpenAICompatProvider
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 _PROVIDER_REGISTRY: dict[str, type[LLMProvider]] = {
     "deepseek": DeepSeekProvider,
     "openai_compat": OpenAICompatProvider,
+    "anthropic_compat": AnthropicCompatProvider,
 }
 
 

@@ -11,6 +11,7 @@ from src.core.types import (
 )
 
 if TYPE_CHECKING:
+    from src.safety.permission_gate import PermissionGate
     from src.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -19,9 +20,15 @@ PermissionCallback = Callable[[ToolCall], Awaitable[PermissionDecision]]
 
 
 class StreamingExecutor:
-    def __init__(self, registry: ToolRegistry, ctx: ToolContext) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        ctx: ToolContext,
+        permission_gate: PermissionGate | None = None,
+    ) -> None:
         self._registry = registry
         self._ctx = ctx
+        self._gate = permission_gate
 
     async def execute_tool_calls(
         self, tool_calls: list[ToolCall],
@@ -66,14 +73,14 @@ class StreamingExecutor:
     async def _check_permission(
         self, tc: ToolCall, callback: PermissionCallback,
     ) -> PermissionDecision:
-        """Phase 1 inline permission gate (3 checks)."""
-        # 1. Tool exists?
+        """Delegate to PermissionGate when wired; else use Phase 1 inline gate."""
+        if self._gate is not None:
+            return await self._gate.check(tc, callback)
+        # --- Phase 1 fallback (preserved for tests / minimal setups) ---
         if self._registry.get_handler(tc.name) is None:
             return PermissionDecision.BLOCK
-        # 2. Plan mode allows?
         if not self._ctx.plan_mode.is_tool_allowed(tc.name):
             return PermissionDecision.BLOCK
-        # 3. Permission level
         defn = self._registry.get_definition(tc.name)
         if defn is None:
             return PermissionDecision.BLOCK
@@ -82,10 +89,11 @@ class StreamingExecutor:
             return PermissionDecision.ALLOW
         if level == PermissionLevel.DESTRUCTIVE:
             return PermissionDecision.BLOCK
-        # WRITE or EXECUTE: ask user
         return await callback(tc)
 
     def _block_reason(self, tc: ToolCall) -> str:
+        if self._gate is not None and self._gate.last_block_reason:
+            return self._gate.last_block_reason
         if self._registry.get_handler(tc.name) is None:
             return f"Error: unknown tool '{tc.name}'"
         if not self._ctx.plan_mode.is_tool_allowed(tc.name):

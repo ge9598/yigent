@@ -4,11 +4,20 @@
 
 provider:
   # Primary provider
+  # Available: deepseek | openai_compat | anthropic_compat
+  #
+  # anthropic_compat works with the native Anthropic API and any endpoint
+  # speaking the same wire format (e.g. MiniMax's coding plan at
+  # https://api.minimaxi.com/anthropic). Use it like:
+  #   name: anthropic_compat
+  #   api_key: "${ANTHROPIC_API_KEY}"
+  #   base_url: "https://api.anthropic.com"       # or MiniMax's URL
+  #   model: "claude-sonnet-4-5"
   name: deepseek
   api_key: "${DEEPSEEK_API_KEY}"  # or set env var
   base_url: "https://api.deepseek.com/v1"
   model: "deepseek-chat"
-  
+
   # Fallback provider (optional)
   fallback:
     name: openai_compat

@@ -16,6 +16,7 @@ license = {text = "MIT"}
 dependencies = [
     # LLM providers
     "openai>=1.40.0",          # OpenAI-compatible API client (works for DeepSeek too)
+    "anthropic>=0.40.0",       # Anthropic/Claude API client (also works for MiniMax /anthropic)
     "httpx>=0.27.0",           # Async HTTP client
     
     # CLI

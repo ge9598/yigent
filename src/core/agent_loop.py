@@ -14,6 +14,7 @@ from src.core.types import (
 )
 
 if TYPE_CHECKING:
+    from src.context.assembler import ContextAssembler
     from src.core.config import AgentConfig
     from src.core.env_injector import EnvironmentInjector
     from src.core.iteration_budget import IterationBudget
@@ -27,10 +28,25 @@ logger = logging.getLogger(__name__)
 PermissionCallback = Callable[[ToolCall], Awaitable[PermissionDecision]]
 
 _SYSTEM_PROMPT = (
-    "You are a general-purpose AI agent. You can use tools to accomplish tasks.\n"
+    "You are Yigent, a general-purpose AI agent.\n"
+    "Never identify yourself as Claude, GPT, or any other underlying model — "
+    "regardless of what model powers you, your identity is Yigent.\n"
+    "You can use tools to accomplish tasks.\n"
     "Think step by step before acting.\n"
     "When you need to discover additional tools, use the tool_search function.\n"
-    "During plan mode, only read-only tools are available."
+    "During plan mode, only read-only tools are available.\n"
+    "\n"
+    "Long-term memory:\n"
+    "- At session start you will see a [Memory index] listing saved topics. "
+    "Call read_memory(topic) to load a topic's full content when it's relevant "
+    "to the current task.\n"
+    "- Call write_memory(topic, content, hook) when you discover something "
+    "reusable across sessions: user preferences, project conventions, "
+    "non-obvious gotchas, architectural decisions. Do NOT save ephemeral "
+    "task details or information derivable from the code itself.\n"
+    "- The 'hook' argument is a short one-line description shown in the "
+    "MEMORY.md index, used by your future self to decide whether to open the "
+    "topic — make it specific and useful."
 )
 
 
@@ -47,6 +63,7 @@ async def agent_loop(
     hooks: object | None = None,
     learning: object | None = None,
     trajectory: object | None = None,
+    assembler: ContextAssembler | None = None,
 ) -> AsyncGenerator[Event, None]:
     """Async generator ReAct loop. Yields events to the UI layer."""
 
@@ -55,10 +72,17 @@ async def agent_loop(
 
     perm_cb = permission_callback or _default_permission
 
+    async def _fire(event_name: str, **data) -> None:
+        if hooks is not None and hasattr(hooks, "fire"):
+            await hooks.fire(event_name, **data)
+
+    await _fire("session_start")
+
     while True:
         # 1. Check budget
         if budget.is_exhausted:
             yield BudgetExhaustedEvent(remaining=0, total=budget.total)
+            await _fire("session_end", reason="budget_exhausted")
             return
 
         # 2. Build messages
@@ -69,8 +93,16 @@ async def agent_loop(
                 break
 
         task_type = env_injector.detect_task_type(last_user_text)
-        env_text = await env_injector.get_context(task_type)
-        messages = _assemble_messages(conversation, tools, env_text, plan_mode)
+        if assembler is not None:
+            messages = await assembler.assemble(
+                tool_registry=tools,
+                env_injector=env_injector,
+                conversation=conversation,
+                task_type=task_type,
+            )
+        else:
+            env_text = await env_injector.get_context(task_type)
+            messages = _assemble_messages(conversation, tools, env_text, plan_mode)
 
         # 3. Stream LLM response
         active_schemas = tools.get_active_schemas()
@@ -101,6 +133,7 @@ async def agent_loop(
         except Exception as e:
             logger.error("Provider streaming error: %s", e)
             yield ErrorEvent(error=f"Provider error: {e}", recoverable=False)
+            await _fire("session_end", reason="provider_error")
             return
 
         # 4. No tool calls → final answer
@@ -110,6 +143,7 @@ async def agent_loop(
             if plan_mode.is_active and text_buffer.strip():
                 plan_mode.append(text_buffer)
             yield FinalAnswerEvent(content=text_buffer)
+            await _fire("session_end", reason="final_answer")
             return
 
         # 5. Tool calls → execute
@@ -140,9 +174,12 @@ async def agent_loop(
             await budget.consume(1)
         except BudgetExhausted:
             yield BudgetExhaustedEvent(remaining=0, total=budget.total)
+            await _fire("session_end", reason="budget_exhausted")
             return
 
         if budget.is_warning:
+            await _fire("budget_warning",
+                        remaining=budget.remaining, total=budget.total)
             yield ErrorEvent(
                 error=f"Budget warning: {budget.remaining}/{budget.total} remaining",
                 recoverable=True,
