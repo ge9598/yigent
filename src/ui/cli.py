@@ -21,6 +21,7 @@ from src.core.capability_router import CapabilityRouter
 from src.core.config import load_config
 from src.core.env_injector import EnvironmentInjector
 from src.core.iteration_budget import IterationBudget
+from src.core.multi_agent import TaskBoard
 from src.core.plan_mode import PlanMode
 from src.core.streaming_executor import StreamingExecutor
 from src.core.types import (
@@ -38,6 +39,7 @@ from src.safety.permission_gate import PermissionGate
 import src.tools  # trigger self-registration
 from src.tools.mcp_adapter import MCPClient
 from src.tools.registry import get_registry
+from src.tools.task_tools import make_task_tools
 from src.ui.slash_commands import DispatchResult, SlashDispatcher
 
 logger = logging.getLogger(__name__)
@@ -288,6 +290,13 @@ async def async_main() -> None:
     budget = IterationBudget(config.agent.max_iterations)
     plan_mode = PlanMode(save_dir=config.plan_mode.save_dir)
     env_injector = EnvironmentInjector()
+
+    # Phase 2b Unit 5: shared TaskBoard exposed as task tools. The board is
+    # stand-alone for now — spawn_fork / spawn_subagent wiring into the agent
+    # loop is a Phase 3 concern.
+    task_board = TaskBoard()
+    for tool in make_task_tools(task_board):
+        registry.register(tool)
 
     ctx = ToolContext(
         plan_mode=plan_mode, registry=registry,

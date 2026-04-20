@@ -73,7 +73,7 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 ### Multi-agent + router + MCP
 
 - [x] `src/core/capability_router.py` — intent classification + strategy selection
-- [ ] `src/core/multi_agent.py` — Fork (shared cache), Subagent (independent), TaskBoard (in-memory dict + asyncio.Lock)
+- [x] `src/core/multi_agent.py` — Fork (shared cache), Subagent (independent), TaskBoard (in-memory dict + asyncio.Lock)
 - [x] `src/tools/mcp_adapter.py` — MCP stdio + SSE transport + dynamic ToolSchema conversion
   - **Follow-up (safety):** all MCP tools currently default to `READ_ONLY` permission. Write/execute MCP tools bypass the gate. Fix via config field `MCPServerConfig.default_permission` or a heuristic over tool name. Tracked for Phase 2b polish or Phase 3.
   - **Follow-up (routing):** `EnvironmentInjector.detect_task_type` returns `coding`/`data_analysis`/`file_ops`/`research` — none overlap with CCR route keys (`default`/`background`/`long_context`/`thinking`), so only `default` fires today. Reconcile vocabularies before the scenario router is exercised in real workloads.
@@ -117,11 +117,10 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 | + Phase 2b Unit 2 (scenario routing) | 208 |
 | + Phase 2b Unit 3 (MCP adapter) | 219 |
 | + Phase 2b Unit 4 (capability router) | 230 |
+| + Phase 2b Unit 5 (multi-agent) | 250 |
 
 ## Current focus
 
-> Phase 2a complete. Next decision: start Phase 2b (multi-agent + router + MCP +
-> credential pool + scenario routing) or jump to Phase 3 (learning loop + eval).
-> The learning loop and eval do not depend on Phase 2b items, so jumping is
-> viable if interview demo timing favours visible learning behaviour over
-> hidden infrastructure.
+> Phase 2b complete — all five units landed. Next: Phase 3 (learning loop
+> + eval). Periodic nudge, skill auto-creation, trajectory recording,
+> 4-domain benchmark.

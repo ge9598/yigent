@@ -51,3 +51,7 @@ class PromptCache:
     def on_fork(self) -> "PromptCache":
         """Fork inherits the same prefix → shared cache identity."""
         return PromptCache(self._frozen_system)
+
+    def on_subagent(self, new_system: list["Message"]) -> "PromptCache":
+        """Subagent gets an independent prefix → different cache identity."""
+        return PromptCache(new_system)

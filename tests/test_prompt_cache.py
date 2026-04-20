@@ -40,3 +40,19 @@ def test_fork_inherits_prefix_hash() -> None:
     parent = PromptCache(frozen)
     child = parent.on_fork()
     assert child.prefix_hash == parent.prefix_hash
+
+
+def test_on_subagent_creates_independent_cache():
+    from src.context.prompt_cache import PromptCache
+
+    parent = PromptCache(frozen_system=[{"role": "system", "content": "parent"}])
+    sub = parent.on_subagent([{"role": "system", "content": "sub"}])
+    assert sub.prefix_hash != parent.prefix_hash
+
+
+def test_on_fork_preserves_hash():
+    from src.context.prompt_cache import PromptCache
+
+    parent = PromptCache(frozen_system=[{"role": "system", "content": "parent"}])
+    fork = parent.on_fork()
+    assert fork.prefix_hash == parent.prefix_hash
