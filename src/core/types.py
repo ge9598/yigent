@@ -143,6 +143,16 @@ class BudgetExhaustedEvent:
 
 
 @dataclass
+class PlanModeTriggeredEvent:
+    """Yielded when the capability router classifies a user turn as complex.
+
+    The CLI reacts by entering plan mode (blocking writes and executes)
+    before the agent loop continues.
+    """
+    reason: str = ""
+
+
+@dataclass
 class ErrorEvent:
     error: str
     recoverable: bool = False
@@ -155,6 +165,7 @@ Event = (
     | PermissionRequestEvent
     | FinalAnswerEvent
     | BudgetExhaustedEvent
+    | PlanModeTriggeredEvent
     | ErrorEvent
 )
 

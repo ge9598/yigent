@@ -9,12 +9,13 @@ from typing import TYPE_CHECKING, Callable, Awaitable
 from src.core.iteration_budget import BudgetExhausted
 from src.core.types import (
     BudgetExhaustedEvent, ErrorEvent, Event, FinalAnswerEvent, Message,
-    PermissionDecision, StreamChunk, ToolCall, ToolCallStartEvent,
-    ToolResultEvent, TokenEvent,
+    PermissionDecision, PlanModeTriggeredEvent, StreamChunk, ToolCall,
+    ToolCallStartEvent, ToolResultEvent, TokenEvent,
 )
 
 if TYPE_CHECKING:
     from src.context.assembler import ContextAssembler
+    from src.core.capability_router import CapabilityRouter
     from src.core.config import AgentConfig
     from src.core.env_injector import EnvironmentInjector
     from src.core.iteration_budget import IterationBudget
@@ -66,6 +67,7 @@ async def agent_loop(
     trajectory: object | None = None,
     assembler: ContextAssembler | None = None,
     scenario_router: "ScenarioRouter | None" = None,
+    capability_router: "CapabilityRouter | None" = None,
 ) -> AsyncGenerator[Event, None]:
     """Async generator ReAct loop. Yields events to the UI layer."""
 
@@ -79,6 +81,10 @@ async def agent_loop(
             await hooks.fire(event_name, **data)
 
     await _fire("session_start")
+
+    # Track the most recently classified user message so the capability
+    # router fires once per NEW user turn, not once per iteration.
+    last_classified_user_msg: str | None = None
 
     while True:
         # 1. Check budget
@@ -95,6 +101,24 @@ async def agent_loop(
                 break
 
         task_type = env_injector.detect_task_type(last_user_text)
+
+        # Run capability router on each NEW user turn, once. A "new" turn is
+        # identified by the latest user message text differing from the last
+        # one we classified. Skip when plan mode is already active — the
+        # classifier's job is exactly to trigger it, so re-firing would be a
+        # no-op at best and a loop at worst.
+        if (
+            capability_router is not None
+            and last_user_text
+            and last_user_text != last_classified_user_msg
+            and not plan_mode.is_active
+        ):
+            last_classified_user_msg = last_user_text
+            decision = await capability_router.classify(last_user_text)
+            if decision.strategy == "plan_then_execute":
+                plan_mode.enter(session_id="auto")
+                yield PlanModeTriggeredEvent(reason=decision.reason)
+
         if scenario_router is not None:
             active_provider, active_model = scenario_router.select(task_type)
         else:

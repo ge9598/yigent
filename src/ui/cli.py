@@ -17,6 +17,7 @@ from rich.panel import Panel
 from src.context.assembler import ContextAssembler
 from src.context.engine import CompressionEngine
 from src.core.agent_loop import _SYSTEM_PROMPT, agent_loop
+from src.core.capability_router import CapabilityRouter
 from src.core.config import load_config
 from src.core.env_injector import EnvironmentInjector
 from src.core.iteration_budget import IterationBudget
@@ -24,7 +25,7 @@ from src.core.plan_mode import PlanMode
 from src.core.streaming_executor import StreamingExecutor
 from src.core.types import (
     BudgetExhaustedEvent, ErrorEvent, FinalAnswerEvent,
-    PermissionDecision, ToolCall, ToolCallStartEvent,
+    PermissionDecision, PlanModeTriggeredEvent, ToolCall, ToolCallStartEvent,
     ToolContext, ToolResultEvent, TokenEvent,
 )
 from src.memory.markdown_store import MarkdownMemoryStore
@@ -76,7 +77,8 @@ def _show_tools(registry) -> None:
 
 async def _run_conversation(config, provider, registry, budget, plan_mode,
                             env_injector, executor, ctx, assembler, hooks,
-                            memory_store, scenario_router=None) -> None:
+                            memory_store, scenario_router=None,
+                            capability_router=None) -> None:
     """Main REPL loop."""
     session = PromptSession()
     working = WorkingMemory()
@@ -207,6 +209,7 @@ async def _run_conversation(config, provider, registry, budget, plan_mode,
                 permission_callback=_permission_prompt,
                 assembler=assembler, hooks=hooks,
                 scenario_router=scenario_router,
+                capability_router=capability_router,
             ):
                 if isinstance(event, TokenEvent):
                     console.print(event.token, end="")
@@ -227,6 +230,10 @@ async def _run_conversation(config, provider, registry, budget, plan_mode,
                 elif isinstance(event, BudgetExhaustedEvent):
                     console.print("[bold red]Budget exhausted.[/]")
                     return
+                elif isinstance(event, PlanModeTriggeredEvent):
+                    console.print(
+                        f"[bold yellow]Plan mode triggered:[/bold yellow] {event.reason}",
+                    )
                 elif isinstance(event, ErrorEvent):
                     style = "yellow" if event.recoverable else "red"
                     console.print(f"[{style}]{event.error}[/]")
@@ -239,7 +246,7 @@ async def _run_conversation(config, provider, registry, budget, plan_mode,
 
 async def _smoke_test(config, provider, registry, budget, plan_mode,
                       env_injector, executor, ctx, assembler, hooks,
-                      scenario_router=None) -> None:
+                      scenario_router=None, capability_router=None) -> None:
     """Send one message, verify response, exit."""
     conversation = [{"role": "user", "content": "What tools do you have? List them briefly."}]
     got_answer = False
@@ -249,6 +256,7 @@ async def _smoke_test(config, provider, registry, budget, plan_mode,
         plan_mode=plan_mode, config=config,
         assembler=assembler, hooks=hooks,
         scenario_router=scenario_router,
+        capability_router=capability_router,
     ):
         if isinstance(event, TokenEvent):
             console.print(event.token, end="")
@@ -320,6 +328,10 @@ async def async_main() -> None:
         safety_buffer=config.context.buffer,
     )
 
+    # Phase 2b Unit 4: capability router. Reuses the same auxiliary LLM as
+    # compression. With no aux provider, defaults to "direct" (pass-through).
+    capability_router = CapabilityRouter(aux_provider=aux_provider)
+
     # Make memory store available to memory tools via ToolContext.
     ctx.memory_store = memory_store
 
@@ -346,11 +358,13 @@ async def async_main() -> None:
         if args.smoke_test:
             await _smoke_test(config, provider, registry, budget, plan_mode,
                              env_injector, executor, ctx, assembler, hooks,
-                             scenario_router=scenario_router)
+                             scenario_router=scenario_router,
+                             capability_router=capability_router)
         else:
             await _run_conversation(config, provider, registry, budget, plan_mode,
                                    env_injector, executor, ctx, assembler, hooks,
-                                   memory_store, scenario_router=scenario_router)
+                                   memory_store, scenario_router=scenario_router,
+                                   capability_router=capability_router)
     finally:
         for client in mcp_clients:
             try:

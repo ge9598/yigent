@@ -72,7 +72,7 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 
 ### Multi-agent + router + MCP
 
-- [ ] `src/core/capability_router.py` — intent classification + strategy selection
+- [x] `src/core/capability_router.py` — intent classification + strategy selection
 - [ ] `src/core/multi_agent.py` — Fork (shared cache), Subagent (independent), TaskBoard (in-memory dict + asyncio.Lock)
 - [x] `src/tools/mcp_adapter.py` — MCP stdio + SSE transport + dynamic ToolSchema conversion
   - **Follow-up (safety):** all MCP tools currently default to `READ_ONLY` permission. Write/execute MCP tools bypass the gate. Fix via config field `MCPServerConfig.default_permission` or a heuristic over tool name. Tracked for Phase 2b polish or Phase 3.
@@ -116,6 +116,7 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 | + Phase 2b Unit 1 (credential pool) | 197 |
 | + Phase 2b Unit 2 (scenario routing) | 208 |
 | + Phase 2b Unit 3 (MCP adapter) | 219 |
+| + Phase 2b Unit 4 (capability router) | 230 |
 
 ## Current focus
 
