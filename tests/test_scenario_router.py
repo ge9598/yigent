@@ -195,3 +195,71 @@ async def test_agent_loop_selects_via_router(monkeypatch):
     assert p is big and m == "m-big"
     p, m = router.select("unknown_type")
     assert p is fast and m == "m-fast"  # falls back to default
+
+
+def test_task_type_to_route_mapping_covers_injector_vocabulary():
+    """agent_loop maps env_injector task types into CCR route keys.
+
+    Without this mapping only the 'default' route would ever fire because
+    EnvironmentInjector.detect_task_type returns coding/data_analysis/
+    file_ops/research which don't overlap with the CCR route names.
+    """
+    from src.core.agent_loop import _TASK_TYPE_TO_ROUTE
+    from src.core.env_injector import _TASK_KEYWORDS
+
+    # Every injector task type must have an explicit route mapping.
+    for injector_type in _TASK_KEYWORDS:
+        assert injector_type in _TASK_TYPE_TO_ROUTE, (
+            f"injector task type {injector_type!r} has no route mapping"
+        )
+
+    # Mapped values must be valid CCR route keys.
+    valid_route_keys = {"default", "background", "long_context", "thinking"}
+    for injector_type, route_key in _TASK_TYPE_TO_ROUTE.items():
+        assert route_key in valid_route_keys, (
+            f"{injector_type!r} maps to invalid route {route_key!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_maps_task_type_to_route_key():
+    """Integration: data_analysis task type should select long_context route."""
+    from src.core.agent_loop import _TASK_TYPE_TO_ROUTE
+
+    calls = []
+
+    class _RecordingProvider:
+        async def stream_message(self, messages, model=None, tools=None, temperature=0.0):
+            calls.append(model)
+            from src.core.types import StreamChunk
+            yield StreamChunk(type="done", data="stop", model=model or "test")
+
+    fast = _RecordingProvider()
+    big = _RecordingProvider()
+    router = ScenarioRouter(
+        providers={"fast": fast, "big": big},
+        routes={
+            "default": {"provider": "fast", "model": "m-fast"},
+            "long_context": {"provider": "big", "model": "m-big"},
+            "background": {"provider": "fast", "model": "m-cheap"},
+        },
+    )
+
+    # Simulate the agent_loop translation step for a data_analysis task
+    injector_task_type = "data_analysis"
+    route_key = _TASK_TYPE_TO_ROUTE.get(injector_task_type, injector_task_type)
+    assert route_key == "long_context"
+    _, model = router.select(route_key)
+    assert model == "m-big"
+
+    # research → background
+    route_key = _TASK_TYPE_TO_ROUTE.get("research", "research")
+    assert route_key == "background"
+    _, model = router.select(route_key)
+    assert model == "m-cheap"
+
+    # Unmapped type passes through unchanged; router falls back to default
+    route_key = _TASK_TYPE_TO_ROUTE.get("unknown_type", "unknown_type")
+    assert route_key == "unknown_type"
+    _, model = router.select(route_key)
+    assert model == "m-fast"  # default fallback

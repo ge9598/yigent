@@ -29,6 +29,20 @@ logger = logging.getLogger(__name__)
 
 PermissionCallback = Callable[[ToolCall], Awaitable[PermissionDecision]]
 
+
+# Maps env_injector task types (coding/data_analysis/file_ops/research) to
+# CCR scenario-router route keys (default/background/long_context/thinking).
+# Keeps two separate vocabularies (injector picks by keyword heuristic,
+# router uses CCR-standard names) in sync. ScenarioRouter.select() already
+# falls back to "default" when the key is missing, so this map only needs
+# to mention task types that should route away from default.
+_TASK_TYPE_TO_ROUTE: dict[str, str] = {
+    "coding": "default",
+    "data_analysis": "long_context",  # data tasks may load large files
+    "file_ops": "default",
+    "research": "background",          # low-priority summarization/lookup
+}
+
 _SYSTEM_PROMPT = (
     "You are Yigent, a general-purpose AI agent.\n"
     "Never identify yourself as Claude, GPT, or any other underlying model — "
@@ -120,7 +134,11 @@ async def agent_loop(
                 yield PlanModeTriggeredEvent(reason=decision.reason)
 
         if scenario_router is not None:
-            active_provider, active_model = scenario_router.select(task_type)
+            # Translate env_injector task types to CCR route keys. Unmapped
+            # task types pass through unchanged; ScenarioRouter.select() then
+            # falls back to the "default" route if the key isn't configured.
+            route_key = _TASK_TYPE_TO_ROUTE.get(task_type, task_type)
+            active_provider, active_model = scenario_router.select(route_key)
         else:
             active_provider = provider
             active_model = None

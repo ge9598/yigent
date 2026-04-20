@@ -68,7 +68,7 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 ### Provider-layer hardening
 
 - [x] Credential pool with rotation strategy (Hermes pattern) — `keys: [...]` + `strategy: round_robin/fill_first/least_used/random` + 429/cooldown auto-rotate
-- [x] Scenario routing (CCR pattern) — `routes: {default, background, long_context, thinking}` + per-task-type provider/model selection
+- [x] Scenario routing (CCR pattern) — `routes: {default, background, long_context, thinking}` + per-task-type provider/model selection. agent_loop translates env_injector task types (`coding`/`data_analysis`/`file_ops`/`research`) into CCR route keys via `_TASK_TYPE_TO_ROUTE`.
 
 ### Multi-agent + router + MCP
 

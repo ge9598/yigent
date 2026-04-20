@@ -25,7 +25,10 @@ provider:
   # strategy: "round_robin"    # round_robin | fill_first | least_used | random
   # cooldown_seconds: 60       # 429 cooldown duration
 
-  # Scenario routing (optional — uncomment to enable per-task-type routing)
+  # Scenario routing (optional — uncomment to enable per-task-type routing).
+  # The agent loop translates env_injector task types into these CCR-style
+  # route keys as: coding→default, data_analysis→long_context,
+  # file_ops→default, research→background. Unlisted keys fall back to default.
   # routes:
   #   default:      {provider: deepseek, model: deepseek-chat}
   #   background:   {provider: deepseek, model: deepseek-chat}
