@@ -10,12 +10,16 @@ import json
 import logging
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from openai import AsyncOpenAI
 
 from src.core.types import Message, StreamChunk, ToolCall, ToolSchema
 
 from .base import LLMProvider
+
+if TYPE_CHECKING:
+    from .credential_pool import CredentialPool
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +43,22 @@ class OpenAICompatProvider(LLMProvider):
         model: str = "gpt-4o-mini",
         default_timeout: float = 120.0,
         debug: bool = False,
+        credential_pool: "CredentialPool | None" = None,
     ) -> None:
-        self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            timeout=default_timeout,
-        )
+        self._base_url = base_url
+        self._fallback_key = api_key
+        self._credential_pool = credential_pool
+        self._default_timeout = default_timeout
         self._default_model = model
         self._debug = debug
+        if credential_pool is None:
+            self._client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                timeout=default_timeout,
+            )
+        else:
+            self._client = None  # type: ignore[assignment]
 
     # -- public interface ----------------------------------------------------
 
@@ -81,7 +93,26 @@ class OpenAICompatProvider(LLMProvider):
                 content = (m.get("content") or "")[:100]
                 logger.warning("  msg[%d] role=%s content=%s...", i, role, content)
 
-        stream = await self._client.chat.completions.create(**kwargs)
+        if self._credential_pool is not None:
+            key = self._credential_pool.acquire()
+            client = AsyncOpenAI(
+                api_key=key,
+                base_url=self._base_url,
+                timeout=self._default_timeout,
+            )
+        else:
+            key = self._fallback_key
+            client = self._client  # type: ignore[assignment]
+
+        try:
+            stream = await client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if self._credential_pool is not None:
+                status = getattr(exc, "status_code", None) or getattr(
+                    getattr(exc, "response", None), "status_code", None
+                )
+                self._credential_pool.mark_error(key, status=status)
+            raise
 
         accumulators: dict[int, _ToolCallAccumulator] = {}
 

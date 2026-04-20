@@ -11,5 +11,6 @@ from . import coding  # noqa: F401
 from . import interpreter  # noqa: F401
 from . import search  # noqa: F401
 from . import plan_tools  # noqa: F401
+from . import memory_tools  # noqa: F401
 
 __all__ = ["ToolRegistry", "get_registry", "register"]

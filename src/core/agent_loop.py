@@ -9,28 +9,60 @@ from typing import TYPE_CHECKING, Callable, Awaitable
 from src.core.iteration_budget import BudgetExhausted
 from src.core.types import (
     BudgetExhaustedEvent, ErrorEvent, Event, FinalAnswerEvent, Message,
-    PermissionDecision, StreamChunk, ToolCall, ToolCallStartEvent,
-    ToolResultEvent, TokenEvent,
+    PermissionDecision, PlanModeTriggeredEvent, StreamChunk, ToolCall,
+    ToolCallStartEvent, ToolResultEvent, TokenEvent,
 )
 
 if TYPE_CHECKING:
+    from src.context.assembler import ContextAssembler
+    from src.core.capability_router import CapabilityRouter
     from src.core.config import AgentConfig
     from src.core.env_injector import EnvironmentInjector
     from src.core.iteration_budget import IterationBudget
     from src.core.plan_mode import PlanMode
     from src.core.streaming_executor import StreamingExecutor
     from src.providers.base import LLMProvider
+    from src.providers.scenario_router import ScenarioRouter
     from src.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 PermissionCallback = Callable[[ToolCall], Awaitable[PermissionDecision]]
 
+
+# Maps env_injector task types (coding/data_analysis/file_ops/research) to
+# CCR scenario-router route keys (default/background/long_context/thinking).
+# Keeps two separate vocabularies (injector picks by keyword heuristic,
+# router uses CCR-standard names) in sync. ScenarioRouter.select() already
+# falls back to "default" when the key is missing, so this map only needs
+# to mention task types that should route away from default.
+_TASK_TYPE_TO_ROUTE: dict[str, str] = {
+    "coding": "default",
+    "data_analysis": "long_context",  # data tasks may load large files
+    "file_ops": "default",
+    "research": "background",          # low-priority summarization/lookup
+}
+
 _SYSTEM_PROMPT = (
-    "You are a general-purpose AI agent. You can use tools to accomplish tasks.\n"
+    "You are Yigent, a general-purpose AI agent.\n"
+    "Never identify yourself as Claude, GPT, or any other underlying model — "
+    "regardless of what model powers you, your identity is Yigent.\n"
+    "You can use tools to accomplish tasks.\n"
     "Think step by step before acting.\n"
     "When you need to discover additional tools, use the tool_search function.\n"
-    "During plan mode, only read-only tools are available."
+    "During plan mode, only read-only tools are available.\n"
+    "\n"
+    "Long-term memory:\n"
+    "- At session start you will see a [Memory index] listing saved topics. "
+    "Call read_memory(topic) to load a topic's full content when it's relevant "
+    "to the current task.\n"
+    "- Call write_memory(topic, content, hook) when you discover something "
+    "reusable across sessions: user preferences, project conventions, "
+    "non-obvious gotchas, architectural decisions. Do NOT save ephemeral "
+    "task details or information derivable from the code itself.\n"
+    "- The 'hook' argument is a short one-line description shown in the "
+    "MEMORY.md index, used by your future self to decide whether to open the "
+    "topic — make it specific and useful."
 )
 
 
@@ -47,6 +79,9 @@ async def agent_loop(
     hooks: object | None = None,
     learning: object | None = None,
     trajectory: object | None = None,
+    assembler: ContextAssembler | None = None,
+    scenario_router: "ScenarioRouter | None" = None,
+    capability_router: "CapabilityRouter | None" = None,
 ) -> AsyncGenerator[Event, None]:
     """Async generator ReAct loop. Yields events to the UI layer."""
 
@@ -55,10 +90,21 @@ async def agent_loop(
 
     perm_cb = permission_callback or _default_permission
 
+    async def _fire(event_name: str, **data) -> None:
+        if hooks is not None and hasattr(hooks, "fire"):
+            await hooks.fire(event_name, **data)
+
+    await _fire("session_start")
+
+    # Track the most recently classified user message so the capability
+    # router fires once per NEW user turn, not once per iteration.
+    last_classified_user_msg: str | None = None
+
     while True:
         # 1. Check budget
         if budget.is_exhausted:
             yield BudgetExhaustedEvent(remaining=0, total=budget.total)
+            await _fire("session_end", reason="budget_exhausted")
             return
 
         # 2. Build messages
@@ -69,8 +115,43 @@ async def agent_loop(
                 break
 
         task_type = env_injector.detect_task_type(last_user_text)
-        env_text = await env_injector.get_context(task_type)
-        messages = _assemble_messages(conversation, tools, env_text, plan_mode)
+
+        # Run capability router on each NEW user turn, once. A "new" turn is
+        # identified by the latest user message text differing from the last
+        # one we classified. Skip when plan mode is already active — the
+        # classifier's job is exactly to trigger it, so re-firing would be a
+        # no-op at best and a loop at worst.
+        if (
+            capability_router is not None
+            and last_user_text
+            and last_user_text != last_classified_user_msg
+            and not plan_mode.is_active
+        ):
+            last_classified_user_msg = last_user_text
+            decision = await capability_router.classify(last_user_text)
+            if decision.strategy == "plan_then_execute":
+                plan_mode.enter(session_id="auto")
+                yield PlanModeTriggeredEvent(reason=decision.reason)
+
+        if scenario_router is not None:
+            # Translate env_injector task types to CCR route keys. Unmapped
+            # task types pass through unchanged; ScenarioRouter.select() then
+            # falls back to the "default" route if the key isn't configured.
+            route_key = _TASK_TYPE_TO_ROUTE.get(task_type, task_type)
+            active_provider, active_model = scenario_router.select(route_key)
+        else:
+            active_provider = provider
+            active_model = None
+        if assembler is not None:
+            messages = await assembler.assemble(
+                tool_registry=tools,
+                env_injector=env_injector,
+                conversation=conversation,
+                task_type=task_type,
+            )
+        else:
+            env_text = await env_injector.get_context(task_type)
+            messages = _assemble_messages(conversation, tools, env_text, plan_mode)
 
         # 3. Stream LLM response
         active_schemas = tools.get_active_schemas()
@@ -78,8 +159,9 @@ async def agent_loop(
         tool_calls: list[ToolCall] = []
 
         try:
-            async for chunk in provider.stream_message(
+            async for chunk in active_provider.stream_message(
                 messages=messages,
+                model=active_model,
                 tools=active_schemas if active_schemas else None,
                 temperature=0.0,
             ):
@@ -101,6 +183,7 @@ async def agent_loop(
         except Exception as e:
             logger.error("Provider streaming error: %s", e)
             yield ErrorEvent(error=f"Provider error: {e}", recoverable=False)
+            await _fire("session_end", reason="provider_error")
             return
 
         # 4. No tool calls → final answer
@@ -110,6 +193,7 @@ async def agent_loop(
             if plan_mode.is_active and text_buffer.strip():
                 plan_mode.append(text_buffer)
             yield FinalAnswerEvent(content=text_buffer)
+            await _fire("session_end", reason="final_answer")
             return
 
         # 5. Tool calls → execute
@@ -140,9 +224,12 @@ async def agent_loop(
             await budget.consume(1)
         except BudgetExhausted:
             yield BudgetExhaustedEvent(remaining=0, total=budget.total)
+            await _fire("session_end", reason="budget_exhausted")
             return
 
         if budget.is_warning:
+            await _fire("budget_warning",
+                        remaining=budget.remaining, total=budget.total)
             yield ErrorEvent(
                 error=f"Budget warning: {budget.remaining}/{budget.total} remaining",
                 recoverable=True,

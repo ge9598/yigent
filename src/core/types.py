@@ -13,6 +13,7 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from src.core.config import AgentConfig
     from src.core.plan_mode import PlanMode
+    from src.memory.markdown_store import MarkdownMemoryStore
     from src.tools.registry import ToolRegistry
 
 
@@ -142,6 +143,16 @@ class BudgetExhaustedEvent:
 
 
 @dataclass
+class PlanModeTriggeredEvent:
+    """Yielded when the capability router classifies a user turn as complex.
+
+    The CLI reacts by entering plan mode (blocking writes and executes)
+    before the agent loop continues.
+    """
+    reason: str = ""
+
+
+@dataclass
 class ErrorEvent:
     error: str
     recoverable: bool = False
@@ -154,6 +165,7 @@ Event = (
     | PermissionRequestEvent
     | FinalAnswerEvent
     | BudgetExhaustedEvent
+    | PlanModeTriggeredEvent
     | ErrorEvent
 )
 
@@ -187,8 +199,40 @@ class ToolSchema(BaseModel):
 # ---------------------------------------------------------------------------
 
 ToolHandler = Callable[..., Coroutine[Any, Any, str]]
-ToolValidator = Callable[..., Coroutine[Any, Any, str | None]]
 UserCallback = Callable[[str], Coroutine[Any, Any, str]]
+
+
+# ---------------------------------------------------------------------------
+# ValidateResult — structured decision from a tool's self-check
+# ---------------------------------------------------------------------------
+#
+# Modelled after Claude Code's ``checkPermissions`` return shape. A validator
+# can:
+#   - allow unconditionally
+#   - deny with a reason (shown to the user + model)
+#   - ask the user even for otherwise-auto-allowed tools (e.g. READ_ONLY)
+#   - rewrite the tool's input (normalise paths, strip trailing whitespace)
+#
+# The ``ask`` decision does NOT bypass plan-mode / hook layers — those still
+# run first. It only forces layer 5 to prompt the user regardless of the
+# tool's permission_level.
+
+@dataclass
+class ValidateResult:
+    """Result of ``ToolDefinition.validate()``.
+
+    Attributes:
+        decision: "allow" / "ask" / "deny"
+        reason: human-readable explanation (required when deny or ask)
+        updated_input: optional rewritten args; if set, the handler and the
+                       persisted tool_call see these instead of the originals
+    """
+    decision: Literal["allow", "ask", "deny"]
+    reason: str = ""
+    updated_input: dict[str, Any] | None = None
+
+
+ToolValidator = Callable[..., Coroutine[Any, Any, "ValidateResult"]]
 
 
 @dataclass
@@ -204,6 +248,7 @@ class ToolContext:
     working_dir: Path
     user_callback: UserCallback | None = None
     session_id: str | None = None
+    memory_store: "MarkdownMemoryStore | None" = None
 
 
 @dataclass

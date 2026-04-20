@@ -18,17 +18,40 @@ from pydantic import BaseModel, Field, model_validator
 class ProviderConfig(BaseModel):
     name: str = "deepseek"
     api_key: str = ""
+    keys: list[str] = Field(default_factory=list)
+    strategy: str = "round_robin"
+    cooldown_seconds: float = 60.0
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-chat"
+
+    def effective_keys(self) -> list[str]:
+        """Return the key list. ``keys`` wins over ``api_key`` when both are set."""
+        if self.keys:
+            return list(self.keys)
+        if self.api_key:
+            return [self.api_key]
+        return []
 
 
 class ProviderSection(BaseModel):
     name: str = "deepseek"
     api_key: str = ""
+    keys: list[str] = Field(default_factory=list)
+    strategy: str = "round_robin"
+    cooldown_seconds: float = 60.0
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-chat"
+    routes: dict[str, dict[str, str]] = Field(default_factory=dict)
     fallback: ProviderConfig | None = None
     auxiliary: ProviderConfig | None = None
+
+    def effective_keys(self) -> list[str]:
+        """Return the key list. ``keys`` wins over ``api_key`` when both are set."""
+        if self.keys:
+            return list(self.keys)
+        if self.api_key:
+            return [self.api_key]
+        return []
 
 
 class AgentSection(BaseModel):
@@ -113,6 +136,21 @@ class SearchSection(BaseModel):
     timeout: int = 15
 
 
+class MCPServerConfig(BaseModel):
+    """Config for one external MCP server."""
+    name: str
+    transport: str = "stdio"  # "stdio" | "sse"
+    command: list[str] = Field(default_factory=list)  # for stdio
+    url: str = ""  # for sse
+    env: dict[str, str] = Field(default_factory=dict)
+    # Default permission level for every tool this server exposes. MCP itself
+    # has no permission metadata, so we require an explicit opt-in to anything
+    # above read_only — write/execute MCP tools must be declared at config
+    # time, otherwise the permission gate silently auto-allows them.
+    # Values: "read_only" | "write" | "execute" | "destructive".
+    default_permission: str = "read_only"
+
+
 # ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
@@ -130,6 +168,7 @@ class AgentConfig(BaseModel):
     permissions: PermissionsSection = Field(default_factory=PermissionsSection)
     ui: UISection = Field(default_factory=UISection)
     search: SearchSection = Field(default_factory=SearchSection)
+    mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod

@@ -1,0 +1,24 @@
+# Yigent hook definitions.
+#
+# Hooks are dotted Python paths to a callable that receives event-specific
+# kwargs. They fire at well-defined points in the agent's lifecycle.
+#
+# Events (see src/safety/hook_system.py for full list):
+#   session_start      — fired once at agent loop start
+#   pre_tool_use       — fired before each tool call; returning "deny" blocks
+#   post_tool_use      — fired after each tool call with the result
+#   pre_compression    — fired before context compression begins
+#   post_compression   — fired after compression completes
+#   plan_approved      — fired when the user approves a plan
+#   budget_warning     — fired when budget remaining < warning threshold
+#   session_end        — fired once when the agent loop terminates
+#
+# Phase 2 supports Python callables only. Shell-command hooks → Phase 2b.
+#
+# Example (uncomment to enable):
+# pre_tool_use:
+#   - "src.safety.example_hooks.log_tool_use"
+# post_tool_use:
+#   - "src.safety.example_hooks.run_linter_after_write"
+# session_end:
+#   - "src.safety.example_hooks.save_session_summary"

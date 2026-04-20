@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .openai_compat import OpenAICompatProvider
+
+if TYPE_CHECKING:
+    from .credential_pool import CredentialPool
 
 
 class DeepSeekProvider(OpenAICompatProvider):
@@ -15,6 +20,7 @@ class DeepSeekProvider(OpenAICompatProvider):
         model: str = "deepseek-chat",
         default_timeout: float = 120.0,
         debug: bool = False,
+        credential_pool: "CredentialPool | None" = None,
     ) -> None:
         super().__init__(
             api_key=api_key,
@@ -22,4 +28,5 @@ class DeepSeekProvider(OpenAICompatProvider):
             model=model,
             default_timeout=default_timeout,
             debug=debug,
+            credential_pool=credential_pool,
         )
