@@ -186,3 +186,135 @@ def test_provider_section_effective_keys():
     })
     assert section.effective_keys() == ["sk-a", "sk-b", "sk-c"]
     assert section.strategy == "fill_first"
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_acquires_key_per_request(monkeypatch):
+    """OpenAICompatProvider, given a pool, must acquire a fresh key per call."""
+    from src.providers.credential_pool import CredentialPool
+    from src.providers.openai_compat import OpenAICompatProvider
+
+    pool = CredentialPool(keys=["key-A", "key-B"], strategy="round_robin")
+
+    acquired: list[str] = []
+
+    class _FakeStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            return _FakeStream()
+
+    class _FakeChat:
+        def __init__(self):
+            self.completions = _FakeCompletions()
+
+    class _FakeClient:
+        def __init__(self, api_key, **kwargs):
+            acquired.append(api_key)
+            self.chat = _FakeChat()
+
+    monkeypatch.setattr("src.providers.openai_compat.AsyncOpenAI", _FakeClient)
+
+    provider = OpenAICompatProvider(
+        api_key="fallback",
+        base_url="https://example.test/v1",
+        model="test-model",
+        credential_pool=pool,
+    )
+
+    async for _ in provider.stream_message(messages=[{"role": "user", "content": "hi"}]):
+        pass
+    async for _ in provider.stream_message(messages=[{"role": "user", "content": "hi"}]):
+        pass
+
+    assert acquired == ["key-A", "key-B"]
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_without_pool_is_unchanged(monkeypatch):
+    """When no pool is provided, provider reuses a single client per init."""
+    from src.providers.openai_compat import OpenAICompatProvider
+
+    client_init_count = [0]
+
+    class _FakeStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            return _FakeStream()
+
+    class _FakeChat:
+        def __init__(self):
+            self.completions = _FakeCompletions()
+
+    class _FakeClient:
+        def __init__(self, api_key, **kwargs):
+            client_init_count[0] += 1
+            self.chat = _FakeChat()
+
+    monkeypatch.setattr("src.providers.openai_compat.AsyncOpenAI", _FakeClient)
+
+    provider = OpenAICompatProvider(
+        api_key="sk-only",
+        base_url="https://example.test/v1",
+        model="test-model",
+    )
+    async for _ in provider.stream_message(messages=[{"role": "user", "content": "hi"}]):
+        pass
+    async for _ in provider.stream_message(messages=[{"role": "user", "content": "hi"}]):
+        pass
+
+    # Only one client was built (at __init__)
+    assert client_init_count[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_openai_provider_marks_429_on_http_error(monkeypatch):
+    """A failing request with status 429 should notify the pool."""
+    from src.providers.credential_pool import CredentialPool
+    from src.providers.openai_compat import OpenAICompatProvider
+
+    pool = CredentialPool(keys=["k1", "k2"], strategy="round_robin", cooldown_seconds=60)
+
+    class _Error(Exception):
+        def __init__(self):
+            self.status_code = 429
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            raise _Error()
+
+    class _FakeChat:
+        def __init__(self):
+            self.completions = _FakeCompletions()
+
+    class _FakeClient:
+        def __init__(self, api_key, **kwargs):
+            self._api_key = api_key
+            self.chat = _FakeChat()
+
+    monkeypatch.setattr("src.providers.openai_compat.AsyncOpenAI", _FakeClient)
+
+    provider = OpenAICompatProvider(
+        api_key="fallback",
+        base_url="https://example.test/v1",
+        model="test-model",
+        credential_pool=pool,
+    )
+
+    with pytest.raises(_Error):
+        async for _ in provider.stream_message(messages=[{"role": "user", "content": "hi"}]):
+            pass
+
+    # k1 should be cooling now; next acquire returns k2
+    assert pool.acquire() == "k2"
