@@ -25,6 +25,13 @@ provider:
   # strategy: "round_robin"    # round_robin | fill_first | least_used | random
   # cooldown_seconds: 60       # 429 cooldown duration
 
+  # Scenario routing (optional — uncomment to enable per-task-type routing)
+  # routes:
+  #   default:      {provider: deepseek, model: deepseek-chat}
+  #   background:   {provider: deepseek, model: deepseek-chat}
+  #   long_context: {provider: deepseek, model: deepseek-chat}
+  #   thinking:     {provider: deepseek, model: deepseek-reasoner}
+
   # Fallback provider (optional)
   fallback:
     name: openai_compat

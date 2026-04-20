@@ -29,7 +29,9 @@ from src.core.types import (
 )
 from src.memory.markdown_store import MarkdownMemoryStore
 from src.memory.working import WorkingMemory
-from src.providers.resolver import resolve_auxiliary, resolve_provider
+from src.providers.resolver import (
+    resolve_auxiliary, resolve_provider, resolve_scenario_router,
+)
 from src.safety.hook_system import HookSystem, load_hooks_from_config
 from src.safety.permission_gate import PermissionGate
 import src.tools  # trigger self-registration
@@ -73,7 +75,7 @@ def _show_tools(registry) -> None:
 
 async def _run_conversation(config, provider, registry, budget, plan_mode,
                             env_injector, executor, ctx, assembler, hooks,
-                            memory_store) -> None:
+                            memory_store, scenario_router=None) -> None:
     """Main REPL loop."""
     session = PromptSession()
     working = WorkingMemory()
@@ -203,6 +205,7 @@ async def _run_conversation(config, provider, registry, budget, plan_mode,
                 plan_mode=plan_mode, config=config,
                 permission_callback=_permission_prompt,
                 assembler=assembler, hooks=hooks,
+                scenario_router=scenario_router,
             ):
                 if isinstance(event, TokenEvent):
                     console.print(event.token, end="")
@@ -234,7 +237,8 @@ async def _run_conversation(config, provider, registry, budget, plan_mode,
 
 
 async def _smoke_test(config, provider, registry, budget, plan_mode,
-                      env_injector, executor, ctx, assembler, hooks) -> None:
+                      env_injector, executor, ctx, assembler, hooks,
+                      scenario_router=None) -> None:
     """Send one message, verify response, exit."""
     conversation = [{"role": "user", "content": "What tools do you have? List them briefly."}]
     got_answer = False
@@ -243,6 +247,7 @@ async def _smoke_test(config, provider, registry, budget, plan_mode,
         provider=provider, executor=executor, env_injector=env_injector,
         plan_mode=plan_mode, config=config,
         assembler=assembler, hooks=hooks,
+        scenario_router=scenario_router,
     ):
         if isinstance(event, TokenEvent):
             console.print(event.token, end="")
@@ -269,6 +274,7 @@ async def async_main() -> None:
 
     config = load_config()
     provider = resolve_provider(config)
+    scenario_router = resolve_scenario_router(config, provider)
     registry = get_registry()
     budget = IterationBudget(config.agent.max_iterations)
     plan_mode = PlanMode(save_dir=config.plan_mode.save_dir)
@@ -318,11 +324,12 @@ async def async_main() -> None:
 
     if args.smoke_test:
         await _smoke_test(config, provider, registry, budget, plan_mode,
-                         env_injector, executor, ctx, assembler, hooks)
+                         env_injector, executor, ctx, assembler, hooks,
+                         scenario_router=scenario_router)
     else:
         await _run_conversation(config, provider, registry, budget, plan_mode,
                                env_injector, executor, ctx, assembler, hooks,
-                               memory_store)
+                               memory_store, scenario_router=scenario_router)
 
 
 def main() -> None:

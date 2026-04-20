@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from src.core.plan_mode import PlanMode
     from src.core.streaming_executor import StreamingExecutor
     from src.providers.base import LLMProvider
+    from src.providers.scenario_router import ScenarioRouter
     from src.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ async def agent_loop(
     learning: object | None = None,
     trajectory: object | None = None,
     assembler: ContextAssembler | None = None,
+    scenario_router: "ScenarioRouter | None" = None,
 ) -> AsyncGenerator[Event, None]:
     """Async generator ReAct loop. Yields events to the UI layer."""
 
@@ -93,6 +95,11 @@ async def agent_loop(
                 break
 
         task_type = env_injector.detect_task_type(last_user_text)
+        if scenario_router is not None:
+            active_provider, active_model = scenario_router.select(task_type)
+        else:
+            active_provider = provider
+            active_model = None
         if assembler is not None:
             messages = await assembler.assemble(
                 tool_registry=tools,
@@ -110,8 +117,9 @@ async def agent_loop(
         tool_calls: list[ToolCall] = []
 
         try:
-            async for chunk in provider.stream_message(
+            async for chunk in active_provider.stream_message(
                 messages=messages,
+                model=active_model,
                 tools=active_schemas if active_schemas else None,
                 temperature=0.0,
             ):

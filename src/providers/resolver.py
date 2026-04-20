@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from src.core.config import AgentConfig, ProviderConfig, ProviderSection
 
     from .credential_pool import CredentialPool
+    from .scenario_router import ScenarioRouter
 
 from .base import LLMProvider
 
@@ -120,3 +121,23 @@ def resolve_auxiliary(config: AgentConfig) -> LLMProvider | None:
     except Exception as exc:
         logger.warning("Auxiliary provider failed (%s), skipping", exc)
         return None
+
+
+def resolve_scenario_router(
+    config: "AgentConfig",
+    primary_provider: "LLMProvider",
+) -> "ScenarioRouter | None":
+    """Build a ScenarioRouter if routes are configured, else None.
+
+    For this MVP, only the primary provider's name is available for routing
+    — routes may not reference other provider names. (A future extension
+    could add a top-level ``providers:`` map.)
+    """
+    from .scenario_router import ScenarioRouter
+
+    section = config.provider
+    if not section.routes:
+        return None
+
+    providers = {section.name: primary_provider}
+    return ScenarioRouter(providers=providers, routes=section.routes)

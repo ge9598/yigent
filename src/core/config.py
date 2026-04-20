@@ -41,6 +41,7 @@ class ProviderSection(BaseModel):
     cooldown_seconds: float = 60.0
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-chat"
+    routes: dict[str, dict[str, str]] = Field(default_factory=dict)
     fallback: ProviderConfig | None = None
     auxiliary: ProviderConfig | None = None
 
