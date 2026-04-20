@@ -35,6 +35,7 @@ from src.providers.resolver import (
 from src.safety.hook_system import HookSystem, load_hooks_from_config
 from src.safety.permission_gate import PermissionGate
 import src.tools  # trigger self-registration
+from src.tools.mcp_adapter import MCPClient
 from src.tools.registry import get_registry
 from src.ui.slash_commands import DispatchResult, SlashDispatcher
 
@@ -322,14 +323,40 @@ async def async_main() -> None:
     # Make memory store available to memory tools via ToolContext.
     ctx.memory_store = memory_store
 
-    if args.smoke_test:
-        await _smoke_test(config, provider, registry, budget, plan_mode,
-                         env_injector, executor, ctx, assembler, hooks,
-                         scenario_router=scenario_router)
-    else:
-        await _run_conversation(config, provider, registry, budget, plan_mode,
-                               env_injector, executor, ctx, assembler, hooks,
-                               memory_store, scenario_router=scenario_router)
+    # Phase 2b Unit 3: bring up configured MCP servers. Each server's tools
+    # are registered into the shared registry with `${server}__${tool}`
+    # names. Connection failures are logged so one bad server doesn't kill
+    # the whole session.
+    mcp_clients: list[MCPClient] = []
+    for mcp_cfg in config.mcp_servers:
+        client = MCPClient(
+            server_name=mcp_cfg.name,
+            transport=mcp_cfg.transport,
+            command=mcp_cfg.command,
+            url=mcp_cfg.url,
+            env=mcp_cfg.env,
+        )
+        try:
+            await client.connect(registry)
+            mcp_clients.append(client)
+        except Exception as exc:
+            logger.warning("Failed to connect MCP server %r: %s", mcp_cfg.name, exc)
+
+    try:
+        if args.smoke_test:
+            await _smoke_test(config, provider, registry, budget, plan_mode,
+                             env_injector, executor, ctx, assembler, hooks,
+                             scenario_router=scenario_router)
+        else:
+            await _run_conversation(config, provider, registry, budget, plan_mode,
+                                   env_injector, executor, ctx, assembler, hooks,
+                                   memory_store, scenario_router=scenario_router)
+    finally:
+        for client in mcp_clients:
+            try:
+                await client.close()
+            except Exception as exc:
+                logger.debug("Error closing MCP client: %s", exc)
 
 
 def main() -> None:

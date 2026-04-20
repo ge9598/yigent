@@ -74,7 +74,7 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 
 - [ ] `src/core/capability_router.py` — intent classification + strategy selection
 - [ ] `src/core/multi_agent.py` — Fork (shared cache), Subagent (independent), TaskBoard (in-memory dict + asyncio.Lock)
-- [ ] `src/tools/mcp_adapter.py` — MCP stdio + SSE transport + dynamic ToolSchema conversion
+- [x] `src/tools/mcp_adapter.py` — MCP stdio + SSE transport + dynamic ToolSchema conversion
 - [ ] `src/memory/skill_index.py` — skill registry + matching (waits for skill_creator in Phase 3)
 
 ## Phase 3: Learning + eval + polish (Week 3)
@@ -113,6 +113,7 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 | + markdown memory + memory tools + slash | 169 |
 | + Phase 2b Unit 1 (credential pool) | 197 |
 | + Phase 2b Unit 2 (scenario routing) | 208 |
+| + Phase 2b Unit 3 (MCP adapter) | 219 |
 
 ## Current focus
 

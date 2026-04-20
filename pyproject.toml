@@ -37,6 +37,9 @@ dependencies = [
     
     # Utilities
     "tiktoken>=0.7.0",         # Token counting
+
+    # External tools
+    "mcp>=1.0.0",              # Model Context Protocol SDK (stdio + SSE clients)
 ]
 
 [project.optional-dependencies]

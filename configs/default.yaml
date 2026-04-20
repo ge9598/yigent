@@ -124,3 +124,17 @@ ui:
   streaming: true
   show_tool_calls: true
   show_permission_prompts: true
+
+# External MCP (Model Context Protocol) servers. When enabled, each server's
+# tools are dynamically registered into ToolRegistry with a namespaced prefix
+# (e.g. `git__read_file`). Connection failures are logged; other servers
+# continue to run.
+#
+# mcp_servers:
+#   - name: git
+#     transport: stdio
+#     command: ["uvx", "mcp-server-git"]
+#     env: {}
+#   - name: fetch
+#     transport: stdio
+#     command: ["uvx", "mcp-server-fetch"]

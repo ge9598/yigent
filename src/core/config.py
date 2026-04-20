@@ -136,6 +136,15 @@ class SearchSection(BaseModel):
     timeout: int = 15
 
 
+class MCPServerConfig(BaseModel):
+    """Config for one external MCP server."""
+    name: str
+    transport: str = "stdio"  # "stdio" | "sse"
+    command: list[str] = Field(default_factory=list)  # for stdio
+    url: str = ""  # for sse
+    env: dict[str, str] = Field(default_factory=dict)
+
+
 # ---------------------------------------------------------------------------
 # Top-level config
 # ---------------------------------------------------------------------------
@@ -153,6 +162,7 @@ class AgentConfig(BaseModel):
     permissions: PermissionsSection = Field(default_factory=PermissionsSection)
     ui: UISection = Field(default_factory=UISection)
     search: SearchSection = Field(default_factory=SearchSection)
+    mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
