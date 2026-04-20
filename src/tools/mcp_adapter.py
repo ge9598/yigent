@@ -30,6 +30,7 @@ def mcp_tool_to_definition(
     mcp_tool: dict[str, Any],
     server_name: str,
     call_tool: MCPToolCallable | None,
+    permission_level: PermissionLevel = PermissionLevel.READ_ONLY,
 ) -> ToolDefinition:
     """Convert an MCP tool dict into an internal ToolDefinition.
 
@@ -38,6 +39,10 @@ def mcp_tool_to_definition(
 
     ``call_tool`` is the async function that invokes the tool on the server;
     it's closed over by the generated handler. For schema-only tests, pass None.
+
+    ``permission_level`` is the security classification applied to every tool
+    from this server. MCP has no per-tool permission metadata, so the caller
+    must declare the risk level explicitly (via ``MCPServerConfig.default_permission``).
     """
     raw_name = mcp_tool["name"]
     prefixed = f"{server_name}__{raw_name}"
@@ -60,7 +65,7 @@ def mcp_tool_to_definition(
         name=prefixed,
         description=description,
         parameters=parameters,
-        permission_level=PermissionLevel.READ_ONLY,
+        permission_level=permission_level,
         timeout=60,
         deferred=False,
     )
@@ -116,12 +121,26 @@ class MCPClient:
         url: str = "",
         env: dict[str, str] | None = None,
         session_factory: Callable[[], Any] | None = None,
+        default_permission: str | PermissionLevel = PermissionLevel.READ_ONLY,
     ) -> None:
         self._server_name = server_name
         self._transport = transport
         self._command = list(command or [])
         self._url = url
         self._env = dict(env or {})
+        # Classify every tool from this server at this permission level.
+        # Accept either the enum or its string value (for YAML config ergonomics).
+        if isinstance(default_permission, str):
+            try:
+                self._default_permission = PermissionLevel(default_permission)
+            except ValueError as exc:
+                valid = [p.value for p in PermissionLevel]
+                raise ValueError(
+                    f"Unknown default_permission {default_permission!r} for MCP "
+                    f"server {server_name!r}. Valid: {valid}"
+                ) from exc
+        else:
+            self._default_permission = default_permission
         # Test seam: allow tests to inject a fake session context manager
         self._session_factory = session_factory
         self._session: Any | None = None
@@ -157,6 +176,7 @@ class MCPClient:
                 tool_dict,
                 server_name=self._server_name,
                 call_tool=self._session.call_tool,
+                permission_level=self._default_permission,
             )
             try:
                 registry.register(definition)

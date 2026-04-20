@@ -356,6 +356,7 @@ async def async_main() -> None:
             command=mcp_cfg.command,
             url=mcp_cfg.url,
             env=mcp_cfg.env,
+            default_permission=mcp_cfg.default_permission,
         )
         try:
             await client.connect(registry)

@@ -143,6 +143,12 @@ class MCPServerConfig(BaseModel):
     command: list[str] = Field(default_factory=list)  # for stdio
     url: str = ""  # for sse
     env: dict[str, str] = Field(default_factory=dict)
+    # Default permission level for every tool this server exposes. MCP itself
+    # has no permission metadata, so we require an explicit opt-in to anything
+    # above read_only — write/execute MCP tools must be declared at config
+    # time, otherwise the permission gate silently auto-allows them.
+    # Values: "read_only" | "write" | "execute" | "destructive".
+    default_permission: str = "read_only"
 
 
 # ---------------------------------------------------------------------------

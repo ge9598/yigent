@@ -130,11 +130,21 @@ ui:
 # (e.g. `git__read_file`). Connection failures are logged; other servers
 # continue to run.
 #
+# `default_permission` classifies every tool from that server. MCP itself has
+# no permission metadata, so write/execute-capable servers MUST be declared
+# explicitly — otherwise the permission gate silently auto-allows dangerous
+# operations. Values: read_only | write | execute | destructive.
+#
 # mcp_servers:
-#   - name: git
+#   - name: git                               # read-only exploration
 #     transport: stdio
 #     command: ["uvx", "mcp-server-git"]
-#     env: {}
-#   - name: fetch
+#     default_permission: read_only
+#   - name: fs                                # filesystem writes
 #     transport: stdio
-#     command: ["uvx", "mcp-server-fetch"]
+#     command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+#     default_permission: write
+#   - name: shell                             # shell execution
+#     transport: stdio
+#     command: ["uvx", "mcp-server-shell"]
+#     default_permission: execute

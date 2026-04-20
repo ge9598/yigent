@@ -221,3 +221,96 @@ async def test_mcp_client_unknown_transport_raises():
     client = MCPClient(server_name="x", transport="bogus")
     with pytest.raises(ValueError, match="Unknown MCP transport"):
         await client.connect(ToolRegistry())
+
+
+def test_default_permission_is_read_only():
+    """Without an explicit override, MCP tools default to read_only."""
+    from src.core.types import PermissionLevel
+
+    definition = mcp_tool_to_definition(
+        {"name": "x", "description": "d", "inputSchema": {"type": "object"}},
+        server_name="s",
+        call_tool=None,
+    )
+    assert definition.schema.permission_level == PermissionLevel.READ_ONLY
+
+
+def test_explicit_permission_level_propagates_to_schema():
+    """Caller can raise the permission level for write/execute MCP tools."""
+    from src.core.types import PermissionLevel
+
+    definition = mcp_tool_to_definition(
+        {"name": "x", "description": "d", "inputSchema": {"type": "object"}},
+        server_name="s",
+        call_tool=None,
+        permission_level=PermissionLevel.EXECUTE,
+    )
+    assert definition.schema.permission_level == PermissionLevel.EXECUTE
+
+
+@pytest.mark.asyncio
+async def test_mcp_client_applies_default_permission_to_all_tools():
+    """MCPClient(default_permission="write") must tag every registered tool."""
+    from src.core.types import PermissionLevel
+    from src.tools.mcp_adapter import MCPClient
+    from src.tools.registry import ToolRegistry
+
+    class _FakeSession:
+        async def list_tools(self):
+            class _T:
+                pass
+            t = _T()
+            t.tools = [
+                type("Tool", (), {
+                    "name": "write_something",
+                    "description": "x",
+                    "inputSchema": {"type": "object"},
+                })(),
+                type("Tool", (), {
+                    "name": "read_something",
+                    "description": "y",
+                    "inputSchema": {"type": "object"},
+                })(),
+            ]
+            return t
+
+        async def call_tool(self, name, arguments):
+            return None
+
+    class _FakeCM:
+        async def __aenter__(self):
+            return _FakeSession()
+
+        async def __aexit__(self, *a):
+            return None
+
+    registry = ToolRegistry()
+    client = MCPClient(
+        server_name="fs",
+        session_factory=lambda: _FakeCM(),
+        default_permission="write",
+    )
+    await client.connect(registry)
+
+    assert registry.get_definition("fs__write_something").schema.permission_level == PermissionLevel.WRITE
+    assert registry.get_definition("fs__read_something").schema.permission_level == PermissionLevel.WRITE
+    await client.close()
+
+
+def test_mcp_client_rejects_invalid_permission_string():
+    """Unknown permission level string must raise at construction time."""
+    from src.tools.mcp_adapter import MCPClient
+
+    with pytest.raises(ValueError, match="Unknown default_permission"):
+        MCPClient(server_name="x", default_permission="bogus")
+
+
+def test_mcp_server_config_default_permission_field():
+    """Pydantic model accepts default_permission field with read_only default."""
+    from src.core.config import MCPServerConfig
+
+    m = MCPServerConfig.model_validate({"name": "x"})
+    assert m.default_permission == "read_only"
+
+    m2 = MCPServerConfig.model_validate({"name": "y", "default_permission": "execute"})
+    assert m2.default_permission == "execute"
