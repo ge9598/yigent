@@ -140,14 +140,15 @@ def test_mcp_server_config_model():
 
 
 def test_mcp_server_config_defaults():
-    """Optional fields should default sensibly."""
+    """Optional fields should default sensibly when transport args are valid."""
     from src.core.config import MCPServerConfig
 
-    m = MCPServerConfig.model_validate({"name": "x"})
+    m = MCPServerConfig.model_validate({"name": "x", "command": ["uvx", "x"]})
     assert m.transport == "stdio"
-    assert m.command == []
+    assert m.command == ["uvx", "x"]
     assert m.url == ""
     assert m.env == {}
+    assert m.headers == {}
 
 
 @pytest.mark.asyncio
@@ -204,12 +205,65 @@ async def test_mcp_client_registers_tools_via_session_factory():
 
 
 @pytest.mark.asyncio
-async def test_mcp_client_sse_transport_not_implemented():
+async def test_mcp_client_sse_transport_via_session_factory():
+    """SSE transport works when given an injected session_factory.
+
+    We don't spin up an actual SSE server in unit tests; this verifies the
+    adapter wiring (factory used, tools registered, results round-tripped).
+    The real SSE wire-up is exercised via the session_factory seam, which
+    mirrors the structure of ``_build_sse_session``.
+    """
     from src.tools.mcp_adapter import MCPClient
     from src.tools.registry import ToolRegistry
 
-    client = MCPClient(server_name="x", transport="sse", url="http://example")
-    with pytest.raises(NotImplementedError):
+    class _SseFakeSession:
+        async def list_tools(self):
+            t = type("T", (), {})()
+            t.tools = [
+                type("Tool", (), {
+                    "name": "remote_ping",
+                    "description": "Remote ping over SSE",
+                    "inputSchema": {"type": "object", "properties": {}},
+                })(),
+            ]
+            return t
+
+        async def call_tool(self, name, arguments):
+            return type("R", (), {
+                "content": [type("C", (), {"type": "text", "text": "pong"})()],
+                "isError": False,
+            })()
+
+    class _SseFakeCM:
+        async def __aenter__(self):
+            return _SseFakeSession()
+
+        async def __aexit__(self, *a):
+            return None
+
+    registry = ToolRegistry()
+    client = MCPClient(
+        server_name="remote",
+        transport="sse",
+        url="http://example.com/mcp/sse",
+        session_factory=lambda: _SseFakeCM(),
+    )
+    await client.connect(registry)
+    definition = registry.get_definition("remote__remote_ping")
+    assert definition is not None
+    out = await definition.handler()
+    assert "pong" in out
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_mcp_client_sse_requires_url_when_no_factory():
+    """Without an injected factory, SSE without a URL must raise."""
+    from src.tools.mcp_adapter import MCPClient
+    from src.tools.registry import ToolRegistry
+
+    client = MCPClient(server_name="x", transport="sse", url="")
+    with pytest.raises(ValueError, match="url"):
         await client.connect(ToolRegistry())
 
 
@@ -309,8 +363,45 @@ def test_mcp_server_config_default_permission_field():
     """Pydantic model accepts default_permission field with read_only default."""
     from src.core.config import MCPServerConfig
 
-    m = MCPServerConfig.model_validate({"name": "x"})
+    m = MCPServerConfig.model_validate({"name": "x", "command": ["uvx", "x"]})
     assert m.default_permission == "read_only"
 
-    m2 = MCPServerConfig.model_validate({"name": "y", "default_permission": "execute"})
+    m2 = MCPServerConfig.model_validate({
+        "name": "y", "command": ["uvx", "y"], "default_permission": "execute",
+    })
     assert m2.default_permission == "execute"
+
+
+def test_mcp_server_config_stdio_requires_command():
+    from src.core.config import MCPServerConfig
+    with pytest.raises(ValueError, match="requires 'command'"):
+        MCPServerConfig.model_validate({"name": "x"})
+
+
+def test_mcp_server_config_sse_requires_url():
+    from src.core.config import MCPServerConfig
+    with pytest.raises(ValueError, match="requires 'url'"):
+        MCPServerConfig.model_validate({"name": "x", "transport": "sse"})
+
+
+def test_mcp_server_config_sse_rejects_command():
+    from src.core.config import MCPServerConfig
+    with pytest.raises(ValueError, match="must not set 'command'"):
+        MCPServerConfig.model_validate({
+            "name": "x", "transport": "sse", "url": "http://x",
+            "command": ["x"],
+        })
+
+
+def test_mcp_server_config_stdio_rejects_url():
+    from src.core.config import MCPServerConfig
+    with pytest.raises(ValueError, match="must not set 'url'"):
+        MCPServerConfig.model_validate({
+            "name": "x", "command": ["uvx", "x"], "url": "http://y",
+        })
+
+
+def test_mcp_server_config_unknown_transport():
+    from src.core.config import MCPServerConfig
+    with pytest.raises(ValueError, match="unknown transport"):
+        MCPServerConfig.model_validate({"name": "x", "transport": "carrier-pigeon"})

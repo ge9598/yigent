@@ -43,3 +43,62 @@ class TestPlanMode:
         assert pm.is_tool_allowed("read_file")
         assert not pm.is_tool_allowed("write_file")
         assert pm.is_tool_allowed("exit_plan_mode")
+
+
+class TestPlanModeApproval:
+    """Unit 1 — approve()/reject() flow + plan_approved hook."""
+
+    @pytest.mark.asyncio
+    async def test_approve_fires_plan_approved_hook(self):
+        from src.safety.hook_system import HookSystem
+        hooks = HookSystem()
+        events: list[dict] = []
+
+        async def _record(**data):
+            events.append(data)
+
+        hooks.register("plan_approved", _record)
+        pm = PlanMode(hook_system=hooks)
+        pm.enter("session-42")
+        pm.append("Step 1: do X")
+        result = await pm.approve()
+        assert pm.is_approved
+        assert pm.is_active  # stays active until model exits
+        assert "approved" in result.lower()
+        assert len(events) == 1
+        assert events[0]["session_id"] == "session-42"
+        assert "Step 1" in events[0]["plan_content"]
+
+    @pytest.mark.asyncio
+    async def test_approve_no_op_when_inactive(self):
+        pm = PlanMode()
+        result = await pm.approve()
+        assert "not active" in result.lower()
+        assert not pm.is_approved
+
+    @pytest.mark.asyncio
+    async def test_reject_keeps_plan_mode_active(self):
+        pm = PlanMode()
+        pm.enter("s1")
+        result = await pm.reject(note="too risky")
+        assert pm.is_active  # stays active for revision
+        assert not pm.is_approved
+        assert pm.rejection_note == "too risky"
+        assert "rejected" in result.lower()
+
+    def test_set_hook_system_late_binding(self):
+        from src.safety.hook_system import HookSystem
+        pm = PlanMode()
+        hooks = HookSystem()
+        pm.set_hook_system(hooks)
+        # No assertion — just verify the method exists and sets the attribute.
+
+    @pytest.mark.asyncio
+    async def test_re_enter_resets_approval(self):
+        pm = PlanMode()
+        pm.enter("s1")
+        await pm.approve()
+        assert pm.is_approved
+        pm.exit()
+        pm.enter("s2")
+        assert not pm.is_approved  # fresh session

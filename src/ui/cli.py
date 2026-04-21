@@ -13,6 +13,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.status import Status
 
 from src.context.assembler import ContextAssembler
 from src.context.engine import CompressionEngine
@@ -26,8 +27,9 @@ from src.core.plan_mode import PlanMode
 from src.core.streaming_executor import StreamingExecutor
 from src.core.types import (
     BudgetExhaustedEvent, ErrorEvent, FinalAnswerEvent,
-    PermissionDecision, PlanModeTriggeredEvent, ToolCall, ToolCallStartEvent,
-    ToolContext, ToolResultEvent, TokenEvent,
+    PermissionDecision, PlanModeTriggeredEvent, ReasoningDeltaEvent,
+    ToolCall, ToolCallStartEvent,
+    ToolContext, ToolResultEvent, TokenEvent, TurnStartedEvent,
 )
 from src.memory.markdown_store import MarkdownMemoryStore
 from src.memory.working import WorkingMemory
@@ -203,6 +205,14 @@ async def _run_conversation(config, provider, registry, budget, plan_mode,
 
         # Run agent loop and consume events
         text_streamed = False
+        thinking: Status | None = None
+
+        def _stop_thinking() -> None:
+            nonlocal thinking
+            if thinking is not None:
+                thinking.stop()
+                thinking = None
+
         try:
             async for event in agent_loop(
                 conversation=conversation, tools=registry, budget=budget,
@@ -213,35 +223,67 @@ async def _run_conversation(config, provider, registry, budget, plan_mode,
                 scenario_router=scenario_router,
                 capability_router=capability_router,
             ):
+                if isinstance(event, TurnStartedEvent):
+                    # Turn began — show an immediate spinner so the user
+                    # knows work has started, even before any reasoning or
+                    # tokens have streamed back.
+                    if thinking is None and not text_streamed:
+                        thinking = console.status(
+                            "[dim italic]Preparing...[/]", spinner="dots",
+                        )
+                        thinking.start()
+                    continue
+                if isinstance(event, ReasoningDeltaEvent):
+                    # Reasoning started → refine the spinner label. If no
+                    # spinner is running (turn event was missed somehow),
+                    # start one here.
+                    if thinking is None and not text_streamed:
+                        thinking = console.status(
+                            "[dim italic]Thinking...[/]", spinner="dots",
+                        )
+                        thinking.start()
+                    else:
+                        thinking.update("[dim italic]Thinking...[/]")  # type: ignore[union-attr]
+                    continue
                 if isinstance(event, TokenEvent):
+                    _stop_thinking()
                     console.print(event.token, end="")
                     text_streamed = True
                 elif isinstance(event, ToolCallStartEvent):
+                    _stop_thinking()
                     tc = event.tool_call
                     console.print(f"\n[dim]▶ {tc.name}({tc.arguments})[/]")
                 elif isinstance(event, ToolResultEvent):
+                    _stop_thinking()
                     r = event.result
                     style = "red" if r.is_error else "green"
                     content = r.content[:500] + ("..." if len(r.content) > 500 else "")
                     console.print(Panel(content, title=r.name, border_style=style))
                 elif isinstance(event, FinalAnswerEvent):
+                    _stop_thinking()
                     if text_streamed:
                         console.print()  # newline after streaming
                     else:
                         console.print(Markdown(event.content))
                 elif isinstance(event, BudgetExhaustedEvent):
+                    _stop_thinking()
                     console.print("[bold red]Budget exhausted.[/]")
                     return
                 elif isinstance(event, PlanModeTriggeredEvent):
+                    _stop_thinking()
                     console.print(
                         f"[bold yellow]Plan mode triggered:[/bold yellow] {event.reason}",
                     )
                 elif isinstance(event, ErrorEvent):
+                    _stop_thinking()
                     style = "yellow" if event.recoverable else "red"
                     console.print(f"[{style}]{event.error}[/]")
         except KeyboardInterrupt:
+            _stop_thinking()
             console.print("\n[yellow]Interrupted.[/]")
             continue
+        finally:
+            _stop_thinking()
 
     console.print("[dim]Goodbye.[/]")
 
@@ -316,6 +358,7 @@ async def async_main() -> None:
     # Phase 2 Unit 2: hook system (loaded from config) + permission gate.
     # Both are optional in the constructors so other tests/setups still work.
     hooks = load_hooks_from_config(config.hooks or {})
+    plan_mode.set_hook_system(hooks)
     permission_gate = PermissionGate(
         registry=registry, ctx=ctx, hooks=hooks,
         yolo_mode=config.permissions.yolo_mode,
@@ -327,7 +370,7 @@ async def async_main() -> None:
     # via the breaker. Memory store is injected so Zone 3 can surface the
     # MEMORY.md index to the model automatically.
     aux_provider = resolve_auxiliary(config)
-    compression = CompressionEngine(auxiliary_provider=aux_provider)
+    compression = CompressionEngine(auxiliary_provider=aux_provider, hook_system=hooks)
     assembler = ContextAssembler(
         system_prompt=_SYSTEM_PROMPT,
         plan_mode=plan_mode,
@@ -356,6 +399,7 @@ async def async_main() -> None:
             command=mcp_cfg.command,
             url=mcp_cfg.url,
             env=mcp_cfg.env,
+            headers=mcp_cfg.headers,
             default_permission=mcp_cfg.default_permission,
         )
         try:

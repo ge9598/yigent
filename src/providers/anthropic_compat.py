@@ -25,6 +25,7 @@ from anthropic import AsyncAnthropic
 from src.core.types import Message, StreamChunk, ToolCall, ToolCallDict, ToolSchema
 
 from .base import LLMProvider
+from .endpoint_quirks import detect_quirks
 
 if TYPE_CHECKING:
     from .credential_pool import CredentialPool
@@ -39,6 +40,21 @@ class _ToolUseAccumulator:
     id: str = ""
     name: str = ""
     arguments_buffer: str = ""
+
+
+@dataclass
+class _ThinkingAccumulator:
+    """Accumulates a single ``thinking`` content block across SSE events.
+
+    The text is emitted to the caller as ``reasoning_text``; the signed
+    block (``{"type": "thinking", "thinking": "...", "signature": "..."}``)
+    is preserved verbatim in ``reasoning_details`` for multi-turn recall
+    — but only on the official Anthropic endpoint (third-party gateways
+    reject the signature).
+    """
+    index: int
+    text_buffer: str = ""
+    signature: str = ""
 
 
 class AnthropicCompatProvider(LLMProvider):
@@ -61,6 +77,7 @@ class AnthropicCompatProvider(LLMProvider):
         self._default_model = model
         self._max_tokens = max_tokens
         self._debug = debug
+        self._quirks = detect_quirks(base_url)
         if credential_pool is None:
             self._client = AsyncAnthropic(
                 api_key=api_key,
@@ -81,7 +98,12 @@ class AnthropicCompatProvider(LLMProvider):
     ) -> AsyncGenerator[StreamChunk, None]:
         model = model or self._default_model
 
-        system_text, anthropic_messages = self._translate_messages(messages)
+        system_text, anthropic_messages = self._translate_messages(
+            messages, strip_thinking_signature=self._quirks.strip_thinking_signature,
+        )
+
+        if self._quirks.forbids_zero_temperature and temperature <= 0.0:
+            temperature = self._quirks.min_temperature
 
         kwargs: dict[str, Any] = {
             "model": model,
@@ -117,6 +139,8 @@ class AnthropicCompatProvider(LLMProvider):
         emitted: set[str] = set()
         stop_reason: str | None = None
         had_tools = False
+        # One thinking block per index — Anthropic emits them before text/tool blocks.
+        thinking_accs: dict[int, _ThinkingAccumulator] = {}
 
         if self._credential_pool is not None:
             key = self._credential_pool.acquire()
@@ -136,7 +160,8 @@ class AnthropicCompatProvider(LLMProvider):
 
                     if etype == "content_block_start":
                         block = event.content_block
-                        if getattr(block, "type", None) == "tool_use":
+                        btype = getattr(block, "type", None)
+                        if btype == "tool_use":
                             had_tools = True
                             idx = event.index
                             tool_id = block.id
@@ -150,12 +175,34 @@ class AnthropicCompatProvider(LLMProvider):
                                 data={"id": acc.id, "name": acc.name},
                                 model=model,
                             )
+                        elif btype == "thinking":
+                            # Start of an extended-thinking block. Accumulate
+                            # text + signature silently; emit as a single
+                            # reasoning chunk on block_stop.
+                            thinking_accs[event.index] = _ThinkingAccumulator(
+                                index=event.index,
+                            )
 
                     elif etype == "content_block_delta":
                         delta = event.delta
                         dtype = getattr(delta, "type", None)
                         if dtype == "text_delta":
                             yield StreamChunk(type="token", data=delta.text, model=model)
+                        elif dtype == "thinking_delta":
+                            t_acc = thinking_accs.get(event.index)
+                            fragment = getattr(delta, "thinking", "") or ""
+                            if t_acc is not None:
+                                t_acc.text_buffer += fragment
+                            if fragment:
+                                yield StreamChunk(
+                                    type="reasoning_delta",
+                                    data=fragment,
+                                    model=model,
+                                )
+                        elif dtype == "signature_delta":
+                            t_acc = thinking_accs.get(event.index)
+                            if t_acc is not None:
+                                t_acc.signature += getattr(delta, "signature", "") or ""
                         elif dtype == "input_json_delta":
                             idx = event.index
                             tool_id = index_to_id.get(idx)
@@ -220,6 +267,34 @@ class AnthropicCompatProvider(LLMProvider):
                 model=model,
             )
 
+        # Emit accumulated reasoning, if any. We send ONE reasoning chunk per
+        # turn (concatenating multiple thinking blocks) rather than per-block
+        # — consumers persist this as assistant.reasoning_text.
+        if thinking_accs:
+            text = "\n\n".join(
+                t.text_buffer for t in thinking_accs.values() if t.text_buffer
+            )
+            # Only preserve signed detail blocks on the official Anthropic
+            # endpoint. Third-party /anthropic gateways (MiniMax, Bedrock
+            # proxies) will reject signatures on the next turn.
+            details: list[dict[str, Any]] | None = None
+            if not self._quirks.strip_thinking_signature:
+                details = [
+                    {
+                        "type": "thinking",
+                        "thinking": t.text_buffer,
+                        "signature": t.signature,
+                    }
+                    for t in thinking_accs.values()
+                    if t.text_buffer
+                ]
+            if text or details:
+                yield StreamChunk(
+                    type="reasoning",
+                    data={"text": text, "details": details},
+                    model=model,
+                )
+
         finish_reason = self._map_stop_reason(stop_reason, has_tools=had_tools)
         yield StreamChunk(type="done", data=finish_reason, model=model)
 
@@ -263,9 +338,17 @@ class AnthropicCompatProvider(LLMProvider):
 
     @classmethod
     def _translate_messages(
-        cls, messages: list[Message],
+        cls,
+        messages: list[Message],
+        *,
+        strip_thinking_signature: bool = False,
     ) -> tuple[str, list[dict[str, Any]]]:
-        """Translate OpenAI-style messages to Anthropic (system, messages)."""
+        """Translate OpenAI-style messages to Anthropic (system, messages).
+
+        When ``strip_thinking_signature`` is True, any preserved
+        ``reasoning_details`` on assistant messages is dropped — third-party
+        /anthropic gateways reject Anthropic-proprietary signatures.
+        """
         system_parts: list[str] = []
         out: list[dict[str, Any]] = []
         # Pending tool_result blocks that must be flushed as a single user
@@ -303,7 +386,16 @@ class AnthropicCompatProvider(LLMProvider):
                 continue
 
             if role == "assistant":
-                blocks = cls._assistant_to_blocks(content, msg.get("tool_calls"))
+                # Only pass reasoning_details through on endpoints that accept
+                # signatures (i.e. official Anthropic). Third-party gateways
+                # must see a clean assistant message.
+                reasoning = (
+                    None if strip_thinking_signature
+                    else msg.get("reasoning_details")
+                )
+                blocks = cls._assistant_to_blocks(
+                    content, msg.get("tool_calls"), reasoning_details=reasoning,
+                )
                 if blocks:
                     out.append({"role": "assistant", "content": blocks})
                 continue
@@ -319,9 +411,22 @@ class AnthropicCompatProvider(LLMProvider):
     def _assistant_to_blocks(
         content: str | None,
         tool_calls: list[ToolCallDict] | None,
+        *,
+        reasoning_details: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Build an Anthropic content-block list from an assistant message."""
+        """Build an Anthropic content-block list from an assistant message.
+
+        Thinking blocks come FIRST, per Anthropic's content-block ordering
+        contract for extended-thinking multi-turn tool use.
+        """
         blocks: list[dict[str, Any]] = []
+        for detail in reasoning_details or []:
+            # Trust the stored shape — it was captured verbatim from a prior
+            # Anthropic response. Only pass through blocks we recognise.
+            if isinstance(detail, dict) and detail.get("type") in (
+                "thinking", "redacted_thinking",
+            ):
+                blocks.append(dict(detail))
         if content:
             blocks.append({"type": "text", "text": content})
         for tc in tool_calls or []:

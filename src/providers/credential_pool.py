@@ -1,16 +1,22 @@
-"""Multi-key credential pool with 4 rotation strategies and 429 cooldown.
+"""Multi-key credential pool with 4 rotation strategies and tiered error handling.
 
 Strategies:
-    round_robin — cursor advances each acquire, skipping cooling keys
+    round_robin — cursor advances each acquire, skipping cooling/expired keys
     fill_first  — stick to the first available key until it errors
     least_used  — pick the available key with minimum usage (tie → insertion order)
     random      — uniform random pick among available keys (deterministic with seed)
 
-Error policy (user-confirmed 2026-04-20):
+Error policy (Hermes parity, refined Unit 3 — 2026-04-21):
     HTTP 429 → key enters cooldown for `cooldown_seconds` (default 60s)
-    any other status → rotate to next key, do NOT cool
+    HTTP 402 → key enters billing cooldown for `billing_cooldown_seconds`
+               (default 24h) — likely "out of credits", may recover at billing
+               cycle reset
+    HTTP 401 → key marked permanently expired (auth failed: revoked, wrong, or
+               banned) — `acquire()` skips it forever; `remove_key()` to clean up
+    any other → rotate to next key, do NOT cool
 
-No permanent invalidation — bad keys are removed manually via `remove_key`.
+Expired keys still appear in `list_keys()` and `status()` (so the user can see
+why they're being skipped) but never returned by `acquire()`.
 """
 
 from __future__ import annotations
@@ -29,16 +35,18 @@ _STRATEGIES = {"round_robin", "fill_first", "least_used", "random"}
 class _KeyState:
     usage: int = 0
     cooldown_until: float = 0.0  # monotonic timestamp; 0 = not cooling
+    expired: bool = False        # 401 → permanently unusable until removed
 
 
 class CredentialPool:
-    """Thread-safe pool of API keys with configurable rotation and 429 cooldown."""
+    """Thread-safe pool of API keys with configurable rotation and tiered error policy."""
 
     def __init__(
         self,
         keys: list[str],
         strategy: str = "round_robin",
         cooldown_seconds: float = 60.0,
+        billing_cooldown_seconds: float = 86_400.0,
         seed: int | None = None,
     ) -> None:
         if not keys:
@@ -52,6 +60,7 @@ class CredentialPool:
         )
         self._strategy = strategy
         self._cooldown_seconds = cooldown_seconds
+        self._billing_cooldown_seconds = billing_cooldown_seconds
         self._rr_cursor = 0  # round_robin cursor
         self._sticky: str | None = None  # fill_first current key
         self._rng = _random.Random(seed)
@@ -67,7 +76,7 @@ class CredentialPool:
         with self._lock:
             available = self._available_keys()
             if not available:
-                raise RuntimeError("CredentialPool: all keys in cooldown")
+                raise RuntimeError("CredentialPool: all keys are expired or in cooldown")
 
             if self._strategy == "round_robin":
                 key = self._pick_round_robin(available)
@@ -84,13 +93,23 @@ class CredentialPool:
             return key
 
     def mark_error(self, key: str, status: int) -> None:
-        """Record an error against `key`. 429 triggers cooldown; others just rotate."""
+        """Record an error against `key`. Tiered policy:
+
+        - 401 → permanently expired (auth failure)
+        - 402 → billing cooldown (default 24h)
+        - 429 → rate-limit cooldown (default 60s)
+        - anything else → rotate only, no cool
+        """
         with self._lock:
             state = self._states.get(key)
             if state is None:
                 return  # key already removed; nothing to do
 
-            if status == 429:
+            if status == 401:
+                state.expired = True
+            elif status == 402:
+                state.cooldown_until = time.monotonic() + self._billing_cooldown_seconds
+            elif status == 429:
                 state.cooldown_until = time.monotonic() + self._cooldown_seconds
 
             # For fill_first: any error (429 or not) advances past the sticky
@@ -107,11 +126,11 @@ class CredentialPool:
                     break
 
             # For round_robin: no action needed on error.
-            #   - 429: key enters cooldown; `_available_keys()` filters it out
-            #     on the next acquire, so the cursor naturally walks past it.
-            #   - non-429: the cursor was already advanced past this key by the
-            #     acquire() that returned it (or a later acquire() has already
-            #     moved further). Resetting the cursor here would regress it.
+            #   - cooldown/expired: `_available_keys()` filters them out on the
+            #     next acquire, so the cursor naturally walks past them.
+            #   - non-cooled error: the cursor was already advanced past this
+            #     key by the acquire() that returned it (or a later acquire()
+            #     has already moved further). Resetting would regress it.
 
     def add_key(self, key: str) -> None:
         """Add a new key to the pool (no-op if already present)."""
@@ -148,13 +167,14 @@ class CredentialPool:
             return list(self._states.keys())
 
     def status(self) -> dict[str, dict[str, float | int | bool]]:
-        """Return per-key status snapshot: usage, cooling, seconds_until_ready."""
+        """Return per-key status snapshot: usage, cooling, expired, seconds_until_ready."""
         with self._lock:
             now = time.monotonic()
             return {
                 key: {
                     "usage": state.usage,
                     "cooling": state.cooldown_until > now,
+                    "expired": state.expired,
                     "seconds_until_ready": max(0.0, state.cooldown_until - now),
                 }
                 for key, state in self._states.items()
@@ -164,7 +184,10 @@ class CredentialPool:
 
     def _available_keys(self) -> list[str]:
         now = time.monotonic()
-        return [k for k, s in self._states.items() if s.cooldown_until <= now]
+        return [
+            k for k, s in self._states.items()
+            if not s.expired and s.cooldown_until <= now
+        ]
 
     def _pick_round_robin(self, available: list[str]) -> str:
         keys_list = list(self._states.keys())
@@ -177,7 +200,7 @@ class CredentialPool:
                 self._rr_cursor = (idx + 1) % n
                 return candidate
         # Unreachable: caller already checked `available` is non-empty.
-        raise RuntimeError("CredentialPool: all keys in cooldown")  # pragma: no cover
+        raise RuntimeError("CredentialPool: all keys are expired or in cooldown")  # pragma: no cover
 
     def _pick_fill_first(self, available: list[str]) -> str:
         if self._sticky is not None and self._sticky in available:
@@ -187,7 +210,7 @@ class CredentialPool:
             if key in available:
                 self._sticky = key
                 return key
-        raise RuntimeError("CredentialPool: all keys in cooldown")  # pragma: no cover
+        raise RuntimeError("CredentialPool: all keys are expired or in cooldown")  # pragma: no cover
 
     def _pick_least_used(self, available: list[str]) -> str:
         # Iterate in insertion order so ties resolve to earliest-inserted.
@@ -201,5 +224,5 @@ class CredentialPool:
                 best = key
                 best_usage = usage
         if best is None:
-            raise RuntimeError("CredentialPool: all keys in cooldown")  # pragma: no cover
+            raise RuntimeError("CredentialPool: all keys are expired or in cooldown")  # pragma: no cover
         return best

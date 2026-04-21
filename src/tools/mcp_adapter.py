@@ -1,8 +1,10 @@
 """MCP (Model Context Protocol) adapter.
 
 Converts external MCP server tools into internal ToolDefinitions so they
-look and behave like native tools. For the MVP, only stdio transport is
-supported; SSE is a stub that raises NotImplementedError.
+look and behave like native tools. Two transports are supported:
+
+  - stdio: spawn a subprocess speaking the MCP stdio protocol
+  - sse:   connect to a Server-Sent Events endpoint (requires URL)
 
 MCP specification: https://modelcontextprotocol.io/
 Reference implementations: https://github.com/modelcontextprotocol/servers
@@ -103,7 +105,7 @@ class MCPClient:
 
     Transports:
       - ``stdio``: spawn a subprocess speaking the MCP stdio protocol
-      - ``sse``:  not implemented in this MVP
+      - ``sse``:  connect to an SSE endpoint at ``url`` with optional ``headers``
 
     The lifecycle is::
 
@@ -120,6 +122,7 @@ class MCPClient:
         command: list[str] | None = None,
         url: str = "",
         env: dict[str, str] | None = None,
+        headers: dict[str, str] | None = None,
         session_factory: Callable[[], Any] | None = None,
         default_permission: str | PermissionLevel = PermissionLevel.READ_ONLY,
     ) -> None:
@@ -128,6 +131,7 @@ class MCPClient:
         self._command = list(command or [])
         self._url = url
         self._env = dict(env or {})
+        self._headers = dict(headers or {})
         # Classify every tool from this server at this permission level.
         # Accept either the enum or its string value (for YAML config ergonomics).
         if isinstance(default_permission, str):
@@ -153,9 +157,7 @@ class MCPClient:
         elif self._transport == "stdio":
             self._session_cm = self._build_stdio_session()
         elif self._transport == "sse":
-            raise NotImplementedError(
-                "SSE transport is not implemented in the MVP. Use stdio."
-            )
+            self._session_cm = self._build_sse_session()
         else:
             raise ValueError(f"Unknown MCP transport: {self._transport!r}")
 
@@ -242,3 +244,48 @@ class MCPClient:
                         await self._stdio_ctx.__aexit__(exc_type, exc, tb)
 
         return _StdioSessionContext(params)
+
+    def _build_sse_session(self) -> Any:
+        """Construct an SSE session via the mcp SDK.
+
+        Mirrors ``_build_stdio_session`` — open the SSE transport, wrap in a
+        ``ClientSession``, ``initialize()``. Headers are forwarded so users can
+        pass auth tokens (``Authorization: Bearer ...``).
+        """
+        if not self._url:
+            raise ValueError("sse transport requires 'url'")
+
+        try:
+            from mcp import ClientSession
+            from mcp.client.sse import sse_client
+        except ImportError as exc:
+            raise RuntimeError(
+                "mcp SDK not installed or too old for SSE. "
+                "Run: pip install 'mcp>=1.0.0'"
+            ) from exc
+
+        url = self._url
+        headers = dict(self._headers)
+
+        class _SseSessionContext:
+            def __init__(self):
+                self._sse_ctx = None
+                self._session_ctx = None
+
+            async def __aenter__(self):
+                self._sse_ctx = sse_client(url, headers=headers or None)
+                read, write = await self._sse_ctx.__aenter__()
+                self._session_ctx = ClientSession(read, write)
+                session = await self._session_ctx.__aenter__()
+                await session.initialize()
+                return session
+
+            async def __aexit__(self, exc_type, exc, tb):
+                try:
+                    if self._session_ctx is not None:
+                        await self._session_ctx.__aexit__(exc_type, exc, tb)
+                finally:
+                    if self._sse_ctx is not None:
+                        await self._sse_ctx.__aexit__(exc_type, exc, tb)
+
+        return _SseSessionContext()

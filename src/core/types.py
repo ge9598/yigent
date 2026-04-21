@@ -55,6 +55,17 @@ class Message(TypedDict, total=False):
     tool_calls: list[ToolCallDict]
     tool_call_id: str
     name: str
+    # Reasoning / chain-of-thought content. Two fields with distinct roles:
+    #   reasoning_details — native Anthropic thinking blocks preserved verbatim
+    #     (with signature). Only populated when the provider is Anthropic
+    #     official; re-sent on the next turn to satisfy extended-thinking
+    #     multi-turn requirements. Stripped on third-party /anthropic endpoints
+    #     (MiniMax, Bedrock) because the signature is Anthropic-proprietary.
+    #   reasoning_text — plain-text summary extracted from any reasoning style
+    #     (Anthropic thinking, OpenAI reasoning_content, <think> tags). Used
+    #     for display, persistence, and aux-LLM consumption. Never round-tripped.
+    reasoning_details: list[dict[str, Any]]
+    reasoning_text: str
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +106,8 @@ class StreamChunk:
         "tool_call_start",
         "tool_call_delta",
         "tool_call_complete",
+        "reasoning_delta",  # live thinking fragment — data is str
+        "reasoning",  # final chain-of-thought — {"text": str, "details": list[dict] | None}
         "done",
     ]
     data: Any = None
@@ -106,8 +119,31 @@ class StreamChunk:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class TurnStartedEvent:
+    """First event of every turn. The UI can show an immediate spinner.
+
+    Distinct from :class:`ReasoningDeltaEvent` because the turn's earliest
+    work (capability routing, context assembly, provider handshake) happens
+    before any model output — yet still blocks for seconds on reasoning
+    models. A "Preparing..." indicator fills that gap.
+    """
+
+
+@dataclass
 class TokenEvent:
     token: str
+
+
+@dataclass
+class ReasoningDeltaEvent:
+    """Live signal that the model is producing chain-of-thought.
+
+    Emitted once per thinking fragment. UIs typically show a spinner and
+    discard ``fragment`` (collapsed view), but a verbose mode can stream
+    the text in a dim style. The final assembled reasoning is persisted
+    separately on the assistant message via ``reasoning_text``.
+    """
+    fragment: str
 
 
 @dataclass
@@ -159,7 +195,9 @@ class ErrorEvent:
 
 
 Event = (
-    TokenEvent
+    TurnStartedEvent
+    | TokenEvent
+    | ReasoningDeltaEvent
     | ToolCallStartEvent
     | ToolResultEvent
     | PermissionRequestEvent

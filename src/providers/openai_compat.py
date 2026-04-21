@@ -17,6 +17,8 @@ from openai import AsyncOpenAI
 from src.core.types import Message, StreamChunk, ToolCall, ToolSchema
 
 from .base import LLMProvider
+from .endpoint_quirks import detect_quirks, model_forbids_sampling
+from .reasoning_extractor import ThinkTagStripper, extract_reasoning_content
 
 if TYPE_CHECKING:
     from .credential_pool import CredentialPool
@@ -51,6 +53,7 @@ class OpenAICompatProvider(LLMProvider):
         self._default_timeout = default_timeout
         self._default_model = model
         self._debug = debug
+        self._quirks = detect_quirks(base_url)
         if credential_pool is None:
             self._client = AsyncOpenAI(
                 api_key=api_key,
@@ -70,14 +73,26 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float = 0.0,
     ) -> AsyncGenerator[StreamChunk, None]:
         model = model or self._default_model
+        forbids_sampling = (
+            self._quirks.forbids_sampling_params or model_forbids_sampling(model)
+        )
+
+        # DeepSeek caps max_tokens; honour the lower bound when set.
+        max_tokens = 4096
+        if self._quirks.max_tokens_cap is not None:
+            max_tokens = min(max_tokens, self._quirks.max_tokens_cap)
 
         kwargs: dict = {
             "model": model,
-            "messages": messages,  # type: ignore[arg-type]
-            "temperature": temperature,
+            "messages": _strip_reasoning_for_request(messages),
             "stream": True,
-            "max_tokens": 4096,
+            "max_tokens": max_tokens,
         }
+        # o1-style models reject sampling params entirely; everything else
+        # accepts temperature. Some third-party endpoints (MiniMax /anthropic
+        # already clamped upstream) require non-zero — not our concern here.
+        if not forbids_sampling:
+            kwargs["temperature"] = temperature
         if tools:
             kwargs["tools"] = [t.to_openai_tool() for t in tools]
 
@@ -115,6 +130,12 @@ class OpenAICompatProvider(LLMProvider):
             raise
 
         accumulators: dict[int, _ToolCallAccumulator] = {}
+        # Reasoning buffers — two independent sources that both feed into
+        # the single reasoning_text emitted at stream end:
+        #   * delta.reasoning_content (DeepSeek-R1 / o1 / GLM-Z1)
+        #   * <think>...</think> inside delta.content (MiniMax M2 /v1, Qwen QwQ)
+        reasoning_buffer = ""
+        think_stripper = ThinkTagStripper()
 
         async for chunk in stream:
             if not chunk.choices:
@@ -124,9 +145,23 @@ class OpenAICompatProvider(LLMProvider):
             delta = choice.delta
             finish_reason = choice.finish_reason
 
-            # --- text tokens ---
+            # --- reasoning_content field (Form #2) ---
+            # Not every SDK typestubs this; read defensively.
+            rc = extract_reasoning_content(getattr(delta, "reasoning_content", None))
+            if rc:
+                reasoning_buffer += rc
+                yield StreamChunk(type="reasoning_delta", data=rc, model=model)
+
+            # --- text tokens (may contain <think> tags, Form #3) ---
             if delta.content:
-                yield StreamChunk(type="token", data=delta.content, model=model)
+                user_text, reasoning_text = think_stripper.feed(delta.content)
+                if reasoning_text:
+                    reasoning_buffer += reasoning_text
+                    yield StreamChunk(
+                        type="reasoning_delta", data=reasoning_text, model=model,
+                    )
+                if user_text:
+                    yield StreamChunk(type="token", data=user_text, model=model)
 
             # --- tool call deltas ---
             if delta.tool_calls:
@@ -161,6 +196,19 @@ class OpenAICompatProvider(LLMProvider):
                             data=tool_call,
                             model=model,
                         )
+                # Flush any text the stripper was holding back (end-of-stream).
+                flush_user, flush_reason = think_stripper.finish()
+                if flush_reason:
+                    reasoning_buffer += flush_reason
+                if flush_user:
+                    yield StreamChunk(type="token", data=flush_user, model=model)
+                # OpenAI protocol has no signed thinking blocks → details=None.
+                if reasoning_buffer:
+                    yield StreamChunk(
+                        type="reasoning",
+                        data={"text": reasoning_buffer, "details": None},
+                        model=model,
+                    )
                 yield StreamChunk(type="done", data=finish_reason, model=model)
                 return
 
@@ -177,3 +225,22 @@ class OpenAICompatProvider(LLMProvider):
             )
             arguments = {"_raw": acc.arguments_buffer}
         return ToolCall(id=acc.id, name=acc.name, arguments=arguments)
+
+
+def _strip_reasoning_for_request(messages: list[Message]) -> list[Message]:
+    """Drop ``reasoning_text`` / ``reasoning_details`` before sending.
+
+    These are internal storage fields — OpenAI-protocol endpoints don't
+    recognise them, and third-party services with strict schema validation
+    (some local vLLM builds, OpenRouter on certain routes) will 400 on
+    unknown top-level keys.
+    """
+    cleaned: list[Message] = []
+    for m in messages:
+        if "reasoning_text" in m or "reasoning_details" in m:
+            stripped = {k: v for k, v in m.items()
+                        if k not in ("reasoning_text", "reasoning_details")}
+            cleaned.append(stripped)  # type: ignore[arg-type]
+        else:
+            cleaned.append(m)
+    return cleaned

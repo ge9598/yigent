@@ -36,6 +36,9 @@ def _maybe_build_pool(section) -> "CredentialPool | None":
             keys=keys,
             strategy=section.strategy,
             cooldown_seconds=section.cooldown_seconds,
+            billing_cooldown_seconds=getattr(
+                section, "billing_cooldown_seconds", 86_400.0,
+            ),
         )
     return None
 
@@ -98,25 +101,30 @@ def resolve_provider(config: AgentConfig) -> LLMProvider:
     fb = section.fallback
     fb_pool = _maybe_build_pool(fb)
     return _build_provider(
-        name=fb.name,
-        api_key=_single_key(fb),
-        base_url=fb.base_url,
-        model=fb.model,
+        name=fb.name or section.name,
+        api_key=_single_key(fb) or _single_key(section),
+        base_url=fb.base_url or section.base_url,
+        model=fb.model or section.model,
         credential_pool=fb_pool,
     )
 
 
 def resolve_auxiliary(config: AgentConfig) -> LLMProvider | None:
-    """Resolve the auxiliary provider (for compression, nudge, etc.)."""
+    """Resolve the auxiliary provider (for compression, nudge, etc.).
+
+    Unset fields fall back to the primary provider — auxiliary defaults to a
+    clone of the main provider unless explicitly overridden.
+    """
     aux = config.provider.auxiliary
     if aux is None:
         return None
+    primary = config.provider
     try:
         return _build_provider(
-            name=aux.name,
-            api_key=aux.api_key or config.provider.api_key,
-            base_url=aux.base_url or config.provider.base_url,
-            model=aux.model,
+            name=aux.name or primary.name,
+            api_key=aux.api_key or primary.api_key,
+            base_url=aux.base_url or primary.base_url,
+            model=aux.model or primary.model,
         )
     except Exception as exc:
         logger.warning("Auxiliary provider failed (%s), skipping", exc)
@@ -129,9 +137,17 @@ def resolve_scenario_router(
 ) -> "ScenarioRouter | None":
     """Build a ScenarioRouter if routes are configured, else None.
 
-    For this MVP, only the primary provider's name is available for routing
-    — routes may not reference other provider names. (A future extension
-    could add a top-level ``providers:`` map.)
+    Builds a complete name→instance map covering:
+      - the primary provider (name ``provider.name``)
+      - any aliased providers under ``provider.providers`` (Unit 4)
+      - the fallback provider (name ``provider.fallback.name``) when set
+      - the auxiliary provider (name ``provider.auxiliary.name``) when set
+
+    Aliased providers are instantiated eagerly. Failures during instantiation
+    are logged and the alias is dropped from the map — a bad alias should not
+    take the whole session down. Routes that reference a dropped alias will
+    raise at ``ScenarioRouter`` construction (loud failure preferred over
+    silent route fallback).
     """
     from .scenario_router import ScenarioRouter
 
@@ -139,5 +155,53 @@ def resolve_scenario_router(
     if not section.routes:
         return None
 
-    providers = {section.name: primary_provider}
+    providers: dict[str, "LLMProvider"] = {section.name: primary_provider}
+
+    # Eagerly build aliased providers.
+    for alias, sub in section.providers.items():
+        if alias in providers:
+            logger.warning(
+                "Provider alias %r collides with primary provider name; "
+                "alias entry skipped",
+                alias,
+            )
+            continue
+        try:
+            sub_pool = _maybe_build_pool(sub)
+            providers[alias] = _build_provider(
+                name=sub.name or section.name,
+                api_key=_single_key(sub) or _single_key(section),
+                base_url=sub.base_url or section.base_url,
+                model=sub.model or section.model,
+                debug=config.ui.debug,
+                credential_pool=sub_pool,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Aliased provider %r failed to build (%s) — skipping", alias, exc,
+            )
+
+    # Surface fallback / auxiliary by their declared names too. This lets a
+    # route point at "fallback" (or whatever it's named) without redeclaring.
+    for sub_section in (section.fallback, section.auxiliary):
+        if sub_section is None or not sub_section.name:
+            continue
+        if sub_section.name in providers:
+            continue
+        try:
+            sub_pool = _maybe_build_pool(sub_section)
+            providers[sub_section.name] = _build_provider(
+                name=sub_section.name,
+                api_key=_single_key(sub_section) or _single_key(section),
+                base_url=sub_section.base_url or section.base_url,
+                model=sub_section.model or section.model,
+                debug=config.ui.debug,
+                credential_pool=sub_pool,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not bring %r online for routing (%s) — skipping",
+                sub_section.name, exc,
+            )
+
     return ScenarioRouter(providers=providers, routes=section.routes)

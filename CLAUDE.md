@@ -54,13 +54,17 @@ After any code change, run this sequence:
 pytest tests/ -q && python -m src.ui.cli --smoke-test
 ```
 
+## Working discipline
+
+- **No shortcuts to explain away a problem.** If you catch yourself reaching for a cheap explanation — "the doc is aspirational", "the test is flaky", "close enough for MVP", rewriting the doc to match the code instead of making the code match the doc — stop immediately and solve the real problem. Docs are promises; code has to catch up, not the other way around.
+
 ## Constraints
 
 - Python 3.11+. Use async/await throughout — the agent loop is an async generator.
 - No LangGraph, no LangChain. The whole point is building the harness from scratch.
 - Every tool call passes through the permission gate. No exceptions. No shortcuts.
 - Plan mode blocks writes at the permission layer, not via prompt instructions.
-- Context compression thresholds are dynamic: `model_context_window - 20K - 13K`.
+- Context compression uses three dynamic thresholds: warn at `context_window - 40K`, compress at `-33K`, hard cutoff at `-23K`. See ARCHITECTURE.md §I.
 - IterationBudget (default 90) is shared across parent and all child agents.
 - Tools use deferred loading: names at startup, full schema on first use via ToolSearch.
 - Hook system fires on every tool lifecycle event. Hooks can be Python callables or shell scripts.

@@ -448,7 +448,7 @@ Updated every turn, not just at session start.
 
 Model-agnostic design. Provider ABC with three implementations:
 
-> Refs: [Hermes provider runtime resolution — 5-tier precedence, 3 API modes, credential pools](https://hermes-agent.nousresearch.com/docs/developer-guide/provider-runtime)
+> Refs: [Hermes provider runtime resolution — 4-tier precedence (CLI → config → env → defaults), 3 API modes, credential pools](https://hermes-agent.nousresearch.com/docs/developer-guide/provider-runtime)
 
 | Provider | API format | Models |
 |----------|-----------|--------|

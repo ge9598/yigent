@@ -16,13 +16,20 @@ from pydantic import BaseModel, Field, model_validator
 # ---------------------------------------------------------------------------
 
 class ProviderConfig(BaseModel):
-    name: str = "deepseek"
+    """Sub-provider config (auxiliary / fallback).
+
+    Unlike the top-level :class:`ProviderSection`, fields here default to empty
+    strings so the resolver can tell "not set" from "set to deepseek" and
+    fall back to the primary provider's value.
+    """
+    name: str = ""
     api_key: str = ""
     keys: list[str] = Field(default_factory=list)
     strategy: str = "round_robin"
     cooldown_seconds: float = 60.0
-    base_url: str = "https://api.deepseek.com/v1"
-    model: str = "deepseek-chat"
+    billing_cooldown_seconds: float = 86_400.0  # HTTP 402 → out of credits
+    base_url: str = ""
+    model: str = ""
 
     def effective_keys(self) -> list[str]:
         """Return the key list. ``keys`` wins over ``api_key`` when both are set."""
@@ -39,11 +46,17 @@ class ProviderSection(BaseModel):
     keys: list[str] = Field(default_factory=list)
     strategy: str = "round_robin"
     cooldown_seconds: float = 60.0
+    billing_cooldown_seconds: float = 86_400.0  # HTTP 402 → out of credits
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-chat"
     routes: dict[str, dict[str, str]] = Field(default_factory=dict)
     fallback: ProviderConfig | None = None
     auxiliary: ProviderConfig | None = None
+    # Named providers usable by `routes` (Unit 4 — cross-provider routing).
+    # Keyed by provider alias; each value is a ProviderConfig that the resolver
+    # instantiates eagerly. Routes can then reference any alias defined here,
+    # not just the primary provider's name.
+    providers: dict[str, ProviderConfig] = Field(default_factory=dict)
 
     def effective_keys(self) -> list[str]:
         """Return the key list. ``keys`` wins over ``api_key`` when both are set."""
@@ -142,6 +155,7 @@ class MCPServerConfig(BaseModel):
     transport: str = "stdio"  # "stdio" | "sse"
     command: list[str] = Field(default_factory=list)  # for stdio
     url: str = ""  # for sse
+    headers: dict[str, str] = Field(default_factory=dict)  # SSE auth/etc.
     env: dict[str, str] = Field(default_factory=dict)
     # Default permission level for every tool this server exposes. MCP itself
     # has no permission metadata, so we require an explicit opt-in to anything
@@ -149,6 +163,33 @@ class MCPServerConfig(BaseModel):
     # time, otherwise the permission gate silently auto-allows them.
     # Values: "read_only" | "write" | "execute" | "destructive".
     default_permission: str = "read_only"
+
+    @model_validator(mode="after")
+    def _check_transport_args(self) -> "MCPServerConfig":
+        if self.transport == "stdio":
+            if not self.command:
+                raise ValueError(
+                    f"MCP server {self.name!r}: stdio transport requires 'command'"
+                )
+            if self.url:
+                raise ValueError(
+                    f"MCP server {self.name!r}: stdio transport must not set 'url'"
+                )
+        elif self.transport == "sse":
+            if not self.url:
+                raise ValueError(
+                    f"MCP server {self.name!r}: sse transport requires 'url'"
+                )
+            if self.command:
+                raise ValueError(
+                    f"MCP server {self.name!r}: sse transport must not set 'command'"
+                )
+        else:
+            raise ValueError(
+                f"MCP server {self.name!r}: unknown transport {self.transport!r} "
+                "(valid: stdio, sse)"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

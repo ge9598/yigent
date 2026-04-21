@@ -4,13 +4,14 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Callable, Awaitable
+from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 from src.core.iteration_budget import BudgetExhausted
 from src.core.types import (
     BudgetExhaustedEvent, ErrorEvent, Event, FinalAnswerEvent, Message,
-    PermissionDecision, PlanModeTriggeredEvent, StreamChunk, ToolCall,
-    ToolCallStartEvent, ToolResultEvent, TokenEvent,
+    PermissionDecision, PlanModeTriggeredEvent, ReasoningDeltaEvent,
+    StreamChunk, ToolCall,
+    ToolCallStartEvent, ToolResultEvent, TokenEvent, TurnStartedEvent,
 )
 
 if TYPE_CHECKING:
@@ -116,6 +117,12 @@ async def agent_loop(
 
         task_type = env_injector.detect_task_type(last_user_text)
 
+        # Immediately signal the UI that work has started. The capability
+        # router and the first provider call can each block for seconds on
+        # reasoning models; without this the user sees a blank terminal
+        # with no feedback.
+        yield TurnStartedEvent()
+
         # Run capability router on each NEW user turn, once. A "new" turn is
         # identified by the latest user message text differing from the last
         # one we classified. Skip when plan mode is already active — the
@@ -157,6 +164,8 @@ async def agent_loop(
         active_schemas = tools.get_active_schemas()
         text_buffer = ""
         tool_calls: list[ToolCall] = []
+        reasoning_text = ""
+        reasoning_details: list[dict[str, Any]] | None = None
 
         try:
             async for chunk in active_provider.stream_message(
@@ -178,6 +187,14 @@ async def agent_loop(
                     )
                 elif chunk.type == "tool_call_complete":
                     tool_calls.append(chunk.data)
+                elif chunk.type == "reasoning_delta":
+                    yield ReasoningDeltaEvent(fragment=chunk.data)
+                elif chunk.type == "reasoning":
+                    data = chunk.data or {}
+                    reasoning_text = data.get("text", "") or reasoning_text
+                    details = data.get("details")
+                    if details:
+                        reasoning_details = details
                 elif chunk.type == "done":
                     break
         except Exception as e:
@@ -188,7 +205,12 @@ async def agent_loop(
 
         # 4. No tool calls → final answer
         if not tool_calls:
-            conversation.append(Message(role="assistant", content=text_buffer))
+            final_msg: Message = Message(role="assistant", content=text_buffer)
+            if reasoning_text:
+                final_msg["reasoning_text"] = reasoning_text
+            if reasoning_details:
+                final_msg["reasoning_details"] = reasoning_details
+            conversation.append(final_msg)
             # If in plan mode, buffer the response as plan content
             if plan_mode.is_active and text_buffer.strip():
                 plan_mode.append(text_buffer)
@@ -212,6 +234,10 @@ async def agent_loop(
                 for tc in tool_calls
             ],
         )
+        if reasoning_text:
+            assistant_msg["reasoning_text"] = reasoning_text
+        if reasoning_details:
+            assistant_msg["reasoning_details"] = reasoning_details
         conversation.append(assistant_msg)
 
         results = await executor.execute_tool_calls(tool_calls, perm_cb)

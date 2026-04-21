@@ -126,3 +126,66 @@ class TestStreamingExecutor:
             [tc], permission_callback=AsyncMock(return_value=PermissionDecision.ALLOW))
         assert results[0].is_error
         assert "unknown" in results[0].content.lower()
+
+
+class TestPostToolUseHook:
+    """Unit 1 — executor must fire post_tool_use after each handler returns."""
+
+    def setup_method(self):
+        from src.safety.hook_system import HookSystem
+        from src.safety.permission_gate import PermissionGate
+        self.reg = _make_registry()
+        self.ctx = _make_ctx(self.reg)
+        self.hooks = HookSystem()
+        self.fired: list[dict] = []
+
+        async def _record(**data):
+            self.fired.append(data)
+
+        self.hooks.register("post_tool_use", _record)
+        self.gate = PermissionGate(registry=self.reg, ctx=self.ctx, hooks=self.hooks)
+        self.executor = StreamingExecutor(self.reg, self.ctx, permission_gate=self.gate)
+
+    @pytest.mark.asyncio
+    async def test_fires_on_success(self):
+        tc = ToolCall(id="1", name="echo", arguments={"text": "hi"})
+        await self.executor.execute_tool_calls(
+            [tc], permission_callback=AsyncMock(return_value=PermissionDecision.ALLOW))
+        assert len(self.fired) == 1
+        ev = self.fired[0]
+        assert ev["tool_call"].id == "1"
+        assert ev["result"].content == "echo: hi"
+        assert ev["blocked"] is False
+        assert "duration" in ev
+
+    @pytest.mark.asyncio
+    async def test_fires_on_error(self):
+        tc = ToolCall(id="1", name="fail", arguments={"text": "x"})
+        await self.executor.execute_tool_calls(
+            [tc], permission_callback=AsyncMock(return_value=PermissionDecision.ALLOW))
+        assert len(self.fired) == 1
+        assert self.fired[0]["result"].is_error is True
+        assert self.fired[0]["blocked"] is False
+
+    @pytest.mark.asyncio
+    async def test_fires_on_blocked(self):
+        # Plan mode blocks writer
+        pm = PlanMode()
+        pm.enter("s1")
+        ctx = _make_ctx(self.reg, pm)
+        from src.safety.hook_system import HookSystem
+        from src.safety.permission_gate import PermissionGate
+        hooks = HookSystem()
+        fired: list[dict] = []
+
+        async def _record(**data):
+            fired.append(data)
+
+        hooks.register("post_tool_use", _record)
+        gate = PermissionGate(registry=self.reg, ctx=ctx, hooks=hooks)
+        executor = StreamingExecutor(self.reg, ctx, permission_gate=gate)
+        tc = ToolCall(id="1", name="writer", arguments={"text": "x"})
+        await executor.execute_tool_calls(
+            [tc], permission_callback=AsyncMock(return_value=PermissionDecision.ALLOW))
+        assert len(fired) == 1
+        assert fired[0]["blocked"] is True

@@ -43,15 +43,30 @@ class StreamingExecutor:
 
         # Execute permitted calls in parallel
         results: dict[str, ToolResult] = {}
+        hook_system = self._gate.hooks if self._gate is not None else None
 
         async def _run_one(tc: ToolCall, decision: PermissionDecision) -> None:
             if decision == PermissionDecision.BLOCK:
-                results[tc.id] = ToolResult(
+                blocked = ToolResult(
                     tool_call_id=tc.id, name=tc.name,
                     content=self._block_reason(tc), is_error=True,
                 )
+                results[tc.id] = blocked
+                if hook_system is not None:
+                    await hook_system.fire(
+                        "post_tool_use",
+                        tool_call=tc, result=blocked, blocked=True,
+                    )
                 return
-            results[tc.id] = await self._execute_single(tc)
+            start = asyncio.get_running_loop().time()
+            res = await self._execute_single(tc)
+            results[tc.id] = res
+            if hook_system is not None:
+                duration = asyncio.get_running_loop().time() - start
+                await hook_system.fire(
+                    "post_tool_use",
+                    tool_call=tc, result=res, blocked=False, duration=duration,
+                )
 
         try:
             async with asyncio.TaskGroup() as tg:

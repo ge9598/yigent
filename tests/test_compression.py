@@ -203,3 +203,55 @@ async def test_layer3_success_resets_breaker() -> None:
     ]
     await engine.compress(big_msgs, target_tokens=20)
     assert engine.layer3_breaker.failures == 0
+
+
+# ---------------------------------------------------------------------------
+# Unit 1 — pre_compression / post_compression hooks
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_compression_hooks_fire_when_compression_runs() -> None:
+    from src.safety.hook_system import HookSystem
+    hooks = HookSystem()
+    pre_events: list[dict] = []
+    post_events: list[dict] = []
+
+    async def _pre(**data):
+        pre_events.append(data)
+
+    async def _post(**data):
+        post_events.append(data)
+
+    hooks.register("pre_compression", _pre)
+    hooks.register("post_compression", _post)
+
+    engine = CompressionEngine(tool_result_cap=100, hook_system=hooks)
+    msgs = [
+        {"role": "user", "content": "go"},
+        {"role": "tool", "tool_call_id": "x", "name": "read_file",
+         "content": "X" * 5000},
+    ]
+    await engine.compress(msgs, target_tokens=50)
+    assert len(pre_events) == 1
+    assert pre_events[0]["before_tokens"] > 50
+    assert pre_events[0]["target_tokens"] == 50
+    assert len(post_events) == 1
+    assert 1 in post_events[0]["layers_run"]
+    assert post_events[0]["after_tokens"] <= post_events[0]["before_tokens"]
+
+
+@pytest.mark.asyncio
+async def test_compression_hooks_skip_when_no_compression_needed() -> None:
+    from src.safety.hook_system import HookSystem
+    hooks = HookSystem()
+    pre_events: list[dict] = []
+
+    async def _pre(**data):
+        pre_events.append(data)
+
+    hooks.register("pre_compression", _pre)
+
+    engine = CompressionEngine(hook_system=hooks)
+    msgs = [{"role": "user", "content": "short"}]
+    await engine.compress(msgs, target_tokens=10_000)
+    assert pre_events == []  # no hook fires when target already satisfied

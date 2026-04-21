@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.safety.hook_system import HookSystem
 
 
 class PlanMode:
@@ -25,12 +29,19 @@ class PlanMode:
         "exit_plan_mode",
     })
 
-    def __init__(self, save_dir: str | Path = "plans/") -> None:
+    def __init__(
+        self,
+        save_dir: str | Path = "plans/",
+        hook_system: "HookSystem | None" = None,
+    ) -> None:
         self._active = False
         self._session_id: str | None = None
         self._entered_at: dt.datetime | None = None
         self._save_dir = Path(save_dir)
         self._plan_buffer: str = ""
+        self._hook_system = hook_system
+        self._approved: bool = False
+        self._rejection_note: str | None = None
 
     # ------------------------------------------------------------------
     # State
@@ -54,6 +65,47 @@ class PlanMode:
         self._session_id = session_id
         self._entered_at = dt.datetime.now()
         self._plan_buffer = ""
+        self._approved = False
+        self._rejection_note = None
+
+    @property
+    def is_approved(self) -> bool:
+        return self._approved
+
+    @property
+    def rejection_note(self) -> str | None:
+        return self._rejection_note
+
+    def set_hook_system(self, hooks: "HookSystem | None") -> None:
+        """Late binding for hook system (CLI builds hooks after plan_mode)."""
+        self._hook_system = hooks
+
+    async def approve(self) -> str:
+        """User-side approval. Fires plan_approved. Plan mode stays active until
+        the model calls exit_plan_mode (the model's signal that it's done planning).
+
+        The flag flips so the LLM's next assistant turn sees the approval state
+        in the system prompt and knows it can now call write tools by exiting
+        plan mode.
+        """
+        if not self._active:
+            return "Plan mode is not active."
+        self._approved = True
+        if self._hook_system is not None:
+            await self._hook_system.fire(
+                "plan_approved",
+                session_id=self._session_id,
+                plan_content=self._plan_buffer,
+            )
+        return "Plan approved. Agent may now exit plan mode and execute."
+
+    async def reject(self, note: str = "") -> str:
+        """User-side rejection. Plan mode stays active so the model can revise."""
+        if not self._active:
+            return "Plan mode is not active."
+        self._approved = False
+        self._rejection_note = note or "(no reason given)"
+        return f"Plan rejected: {self._rejection_note}. Plan mode remains active for revision."
 
     def append(self, content: str) -> None:
         """Append content to the internal plan buffer."""

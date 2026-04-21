@@ -423,3 +423,167 @@ async def test_stream_passes_system_and_tools_to_sdk() -> None:
     assert kwargs["tools"] == [
         {"name": "t", "description": "d", "input_schema": {"type": "object"}},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Reasoning / thinking block handling (Step 2)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stream_yields_live_reasoning_delta_fragments() -> None:
+    """Each thinking_delta emits a reasoning_delta chunk (for UX spinner)."""
+    events = [
+        _FakeEvent(
+            type="content_block_start", index=0,
+            content_block=_FakeEvent(type="thinking"),
+        ),
+        _FakeEvent(
+            type="content_block_delta", index=0,
+            delta=_FakeEvent(type="thinking_delta", thinking="step 1 "),
+        ),
+        _FakeEvent(
+            type="content_block_delta", index=0,
+            delta=_FakeEvent(type="thinking_delta", thinking="step 2"),
+        ),
+        _FakeEvent(type="message_delta", delta=_FakeEvent(stop_reason="end_turn")),
+    ]
+    p = _make_provider_with_events(events)
+    chunks = [
+        c async for c in p.stream_message([{"role": "user", "content": "q"}])
+    ]
+    deltas = [c for c in chunks if c.type == "reasoning_delta"]
+    assert [d.data for d in deltas] == ["step 1 ", "step 2"]
+    # Final reasoning chunk still emitted at end with aggregated text.
+    final = [c for c in chunks if c.type == "reasoning"]
+    assert len(final) == 1
+    assert final[0].data["text"] == "step 1 step 2"
+
+
+@pytest.mark.asyncio
+async def test_stream_accumulates_thinking_block_and_emits_reasoning() -> None:
+    """Official endpoint preserves signed thinking blocks in the reasoning chunk."""
+    events = [
+        _FakeEvent(
+            type="content_block_start",
+            index=0,
+            content_block=_FakeEvent(type="thinking"),
+        ),
+        _FakeEvent(
+            type="content_block_delta", index=0,
+            delta=_FakeEvent(type="thinking_delta", thinking="Let me think. "),
+        ),
+        _FakeEvent(
+            type="content_block_delta", index=0,
+            delta=_FakeEvent(type="thinking_delta", thinking="Two plus two is four."),
+        ),
+        _FakeEvent(
+            type="content_block_delta", index=0,
+            delta=_FakeEvent(type="signature_delta", signature="abc123"),
+        ),
+        _FakeEvent(
+            type="content_block_delta", index=1,
+            delta=_FakeEvent(type="text_delta", text="4"),
+        ),
+        _FakeEvent(type="message_delta", delta=_FakeEvent(stop_reason="end_turn")),
+    ]
+    p = _make_provider_with_events(events)
+    chunks = [
+        c async for c in p.stream_message([{"role": "user", "content": "2+2?"}])
+    ]
+    reasoning = [c for c in chunks if c.type == "reasoning"]
+    assert len(reasoning) == 1
+    data = reasoning[0].data
+    assert data["text"] == "Let me think. Two plus two is four."
+    # Official Anthropic (api.anthropic.com by default) → signature preserved.
+    assert data["details"] is not None
+    assert data["details"][0]["type"] == "thinking"
+    assert data["details"][0]["signature"] == "abc123"
+
+
+@pytest.mark.asyncio
+async def test_stream_strips_signature_on_third_party_endpoint() -> None:
+    """MiniMax /anthropic must NOT echo the signature back — it would 400."""
+    events = [
+        _FakeEvent(
+            type="content_block_start", index=0,
+            content_block=_FakeEvent(type="thinking"),
+        ),
+        _FakeEvent(
+            type="content_block_delta", index=0,
+            delta=_FakeEvent(type="thinking_delta", thinking="reasoning"),
+        ),
+        _FakeEvent(
+            type="content_block_delta", index=0,
+            delta=_FakeEvent(type="signature_delta", signature="fake"),
+        ),
+        _FakeEvent(type="message_delta", delta=_FakeEvent(stop_reason="end_turn")),
+    ]
+    p = AnthropicCompatProvider(
+        api_key="k", base_url="https://api.minimaxi.com/anthropic",
+        model="MiniMax-M2.7",
+    )
+    p._client = _FakeClient(events)  # type: ignore[assignment]
+    chunks = [c async for c in p.stream_message([{"role": "user", "content": "hi"}])]
+    reasoning = [c for c in chunks if c.type == "reasoning"]
+    assert len(reasoning) == 1
+    assert reasoning[0].data["text"] == "reasoning"
+    # Text is kept for UI/persistence; details dropped so next turn is clean.
+    assert reasoning[0].data["details"] is None
+
+
+@pytest.mark.asyncio
+async def test_minimax_endpoint_clamps_zero_temperature() -> None:
+    """MiniMax /anthropic rejects temperature=0; provider must clamp to 0.01."""
+    events = [_FakeEvent(type="message_delta", delta=_FakeEvent(stop_reason="end_turn"))]
+    p = AnthropicCompatProvider(
+        api_key="k", base_url="https://api.minimaxi.com/anthropic",
+        model="MiniMax-M2.7",
+    )
+    p._client = _FakeClient(events)  # type: ignore[assignment]
+    _ = [c async for c in p.stream_message(
+        [{"role": "user", "content": "hi"}], temperature=0.0,
+    )]
+    kwargs = p._client.messages.last_kwargs  # type: ignore[attr-defined]
+    assert kwargs["temperature"] == 0.01
+
+
+def test_translate_preserves_reasoning_details_on_official_endpoint() -> None:
+    """Assistant messages with stored thinking blocks round-trip back verbatim."""
+    messages: list[Message] = [
+        {"role": "user", "content": "q1"},
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning_details": [
+                {"type": "thinking", "thinking": "steps", "signature": "sig"},
+            ],
+        },
+        {"role": "user", "content": "q2"},
+    ]
+    _, out = AnthropicCompatProvider._translate_messages(messages)
+    assistant = [m for m in out if m["role"] == "assistant"][0]
+    # Thinking block comes BEFORE text (Anthropic ordering requirement).
+    assert assistant["content"][0]["type"] == "thinking"
+    assert assistant["content"][0]["signature"] == "sig"
+    assert assistant["content"][1]["type"] == "text"
+
+
+def test_translate_strips_reasoning_details_for_third_party() -> None:
+    """Third-party endpoints must not see Anthropic-proprietary signatures."""
+    messages: list[Message] = [
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning_details": [
+                {"type": "thinking", "thinking": "steps", "signature": "sig"},
+            ],
+        },
+        {"role": "user", "content": "q"},
+    ]
+    _, out = AnthropicCompatProvider._translate_messages(
+        messages, strip_thinking_signature=True,
+    )
+    assistant = [m for m in out if m["role"] == "assistant"][0]
+    # Only the text block survives.
+    assert len(assistant["content"]) == 1
+    assert assistant["content"][0]["type"] == "text"

@@ -64,8 +64,87 @@ def test_all_keys_cooling_raises():
     pool = CredentialPool(keys=["k1", "k2"], strategy="round_robin", cooldown_seconds=10)
     pool.mark_error("k1", status=429)
     pool.mark_error("k2", status=429)
-    with pytest.raises(RuntimeError, match="all keys in cooldown"):
+    with pytest.raises(RuntimeError, match="expired or in cooldown"):
         pool.acquire()
+
+
+# ---------------------------------------------------------------------------
+# Unit 3 — 401 / 402 / 429 / generic differentiation
+# ---------------------------------------------------------------------------
+
+def test_401_marks_key_permanently_expired():
+    pool = CredentialPool(keys=["k1", "k2"], strategy="round_robin")
+    pool.mark_error("k1", status=401)
+    # k1 is expired forever; only k2 should ever be returned.
+    for _ in range(10):
+        assert pool.acquire() == "k2"
+    s = pool.status()
+    assert s["k1"]["expired"] is True
+    assert s["k2"]["expired"] is False
+
+
+def test_401_does_not_set_cooldown_clock():
+    """401 means dead key, not retry-later — cooldown_until stays 0."""
+    pool = CredentialPool(keys=["k1", "k2"], cooldown_seconds=10)
+    pool.mark_error("k1", status=401)
+    s = pool.status()
+    assert s["k1"]["seconds_until_ready"] == 0.0
+
+
+def test_402_uses_billing_cooldown_not_rate_limit_cooldown():
+    pool = CredentialPool(
+        keys=["k1", "k2"],
+        cooldown_seconds=10,            # 429 cooldown
+        billing_cooldown_seconds=3600,  # 402 cooldown — much longer
+    )
+    pool.mark_error("k1", status=402)
+    s = pool.status()
+    # k1 cooling for ~1 hour, not 10 seconds.
+    assert s["k1"]["cooling"] is True
+    assert s["k1"]["seconds_until_ready"] > 1000
+
+
+def test_429_uses_short_cooldown():
+    pool = CredentialPool(
+        keys=["k1", "k2"],
+        cooldown_seconds=10,
+        billing_cooldown_seconds=86_400,
+    )
+    pool.mark_error("k1", status=429)
+    s = pool.status()
+    assert s["k1"]["cooling"] is True
+    # 429 cooldown is the short one.
+    assert s["k1"]["seconds_until_ready"] <= 10
+
+
+def test_all_keys_expired_then_429_raises_with_combined_message():
+    pool = CredentialPool(keys=["k1", "k2"], cooldown_seconds=10)
+    pool.mark_error("k1", status=401)  # expired
+    pool.mark_error("k2", status=429)  # cooling
+    with pytest.raises(RuntimeError, match="expired or in cooldown"):
+        pool.acquire()
+
+
+def test_status_exposes_expired_flag():
+    pool = CredentialPool(keys=["a", "b", "c"])
+    pool.mark_error("a", status=401)
+    pool.mark_error("b", status=402)
+    pool.mark_error("c", status=429)
+    s = pool.status()
+    assert s["a"]["expired"] is True
+    assert s["b"]["expired"] is False
+    assert s["b"]["cooling"] is True
+    assert s["c"]["expired"] is False
+    assert s["c"]["cooling"] is True
+
+
+def test_generic_error_no_cooldown_no_expire():
+    """500/503/etc. should rotate but leave the key fully usable."""
+    pool = CredentialPool(keys=["k1", "k2"])
+    pool.mark_error("k1", status=500)
+    s = pool.status()
+    assert s["k1"]["expired"] is False
+    assert s["k1"]["cooling"] is False
 
 
 def test_single_key_works():

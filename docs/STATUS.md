@@ -117,6 +117,8 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 | + Phase 2b Unit 3 (MCP adapter) | 219 |
 | + Phase 2b Unit 4 (capability router) | 230 |
 | + Phase 2b Unit 5 (multi-agent) | 250 |
+| + auxiliary provider defaults to clone of primary | 257 |
+| + reasoning unification (endpoint_quirks + thinking blocks + `<think>` FSM) | 292 |
 
 ## Current focus
 

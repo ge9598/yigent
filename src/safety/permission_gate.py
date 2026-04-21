@@ -71,6 +71,11 @@ class PermissionGate:
         """Reason string for the most recent BLOCK decision."""
         return self._last_block_reason
 
+    @property
+    def hooks(self) -> "HookSystem | None":
+        """Hook system reference (so the executor can fire post_tool_use)."""
+        return self._hooks
+
     async def check(
         self, tc: ToolCall, callback: PermissionCallback,
     ) -> PermissionDecision:

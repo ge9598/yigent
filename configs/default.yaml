@@ -23,7 +23,8 @@ provider:
   #   - "${DEEPSEEK_API_KEY_A}"
   #   - "${DEEPSEEK_API_KEY_B}"
   # strategy: "round_robin"    # round_robin | fill_first | least_used | random
-  # cooldown_seconds: 60       # 429 cooldown duration
+  # cooldown_seconds: 60              # 429 (rate-limit) cooldown duration
+  # billing_cooldown_seconds: 86400   # 402 (out-of-credits) cooldown — default 24h
 
   # Scenario routing (optional — uncomment to enable per-task-type routing).
   # The agent loop translates env_injector task types into these CCR-style
@@ -35,6 +36,25 @@ provider:
   #   long_context: {provider: deepseek, model: deepseek-chat}
   #   thinking:     {provider: deepseek, model: deepseek-reasoner}
 
+  # Cross-provider routing (Unit 4) — define named provider aliases here so
+  # that routes above can reference any of them, not just the primary. Each
+  # alias is a full ProviderConfig.
+  # providers:
+  #   anthropic:
+  #     name: anthropic_compat
+  #     api_key: "${ANTHROPIC_API_KEY}"
+  #     base_url: "https://api.anthropic.com"
+  #     model: "claude-sonnet-4-6"
+  #   gpt5:
+  #     name: openai_compat
+  #     api_key: "${OPENAI_API_KEY}"
+  #     base_url: "https://api.openai.com/v1"
+  #     model: "gpt-5"
+  # # Then in `routes:` you can write
+  # # routes:
+  # #   thinking: {provider: anthropic, model: claude-sonnet-4-6}
+  # #   long_context: {provider: gpt5, model: gpt-5}
+
   # Fallback provider (optional)
   fallback:
     name: openai_compat
@@ -42,10 +62,18 @@ provider:
     base_url: "https://api.openai.com/v1"
     model: "gpt-4o-mini"
 
-  # Auxiliary LLM for compression, nudge, skill creation (cheaper model)
-  auxiliary:
-    name: deepseek
-    model: "deepseek-chat"
+  # Auxiliary LLM for compression, nudge, skill creation.
+  # Any field left unset falls back to the primary provider above —
+  # by default auxiliary is a clone of the main provider. Override only
+  # what you want different (e.g. a cheaper model on the same endpoint):
+  # auxiliary:
+  #   model: "deepseek-chat"           # same provider, cheaper model
+  # auxiliary:                          # or a totally different provider:
+  #   name: deepseek
+  #   api_key: "${DEEPSEEK_API_KEY}"
+  #   base_url: "https://api.deepseek.com/v1"
+  #   model: "deepseek-chat"
+  auxiliary: {}
 
 agent:
   max_iterations: 90        # IterationBudget total (shared across parent + children)
@@ -151,3 +179,9 @@ ui:
 #     transport: stdio
 #     command: ["uvx", "mcp-server-shell"]
 #     default_permission: execute
+#   - name: remote                            # SSE transport (HTTP endpoint)
+#     transport: sse
+#     url: "https://mcp.example.com/sse"
+#     headers:
+#       Authorization: "Bearer ${MCP_REMOTE_TOKEN}"
+#     default_permission: read_only

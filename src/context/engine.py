@@ -31,6 +31,7 @@ from src.context.circuit_breaker import CircuitBreaker
 if TYPE_CHECKING:
     from src.core.types import Message
     from src.providers.base import LLMProvider
+    from src.safety.hook_system import HookSystem
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ class CompressionEngine:
     tool_result_cap: int = 3000
     layer4_keep_turns: int = 5
     layer5_keep_turns: int = 4
+    hook_system: "HookSystem | None" = None
 
     async def compress(
         self,
@@ -88,33 +90,56 @@ class CompressionEngine:
     ) -> list[Message]:
         """Apply layers 1→5 in order, stopping as soon as fits in ``target_tokens``."""
         msgs = list(conversation)
+        before_tokens = estimate_tokens(msgs)
 
-        if estimate_tokens(msgs) <= target_tokens:
+        if before_tokens <= target_tokens:
             return msgs
+
+        if self.hook_system is not None:
+            await self.hook_system.fire(
+                "pre_compression",
+                conversation=msgs, before_tokens=before_tokens,
+                target_tokens=target_tokens,
+            )
+        layers_run: list[int] = []
+
+        async def _finish(result_msgs: list[Message]) -> list[Message]:
+            if self.hook_system is not None:
+                await self.hook_system.fire(
+                    "post_compression",
+                    conversation=result_msgs,
+                    before_tokens=before_tokens,
+                    after_tokens=estimate_tokens(result_msgs),
+                    layers_run=list(layers_run),
+                )
+            return result_msgs
 
         # Layer 1 — truncate large tool results
         msgs = self._layer1_truncate_tool_results(msgs)
+        layers_run.append(1)
         if on_layer:
             await on_layer(1)
         if estimate_tokens(msgs) <= target_tokens:
-            return msgs
+            return await _finish(msgs)
 
         # Layer 2 — dedup repeated file reads
         msgs = self._layer2_dedup_file_reads(msgs)
+        layers_run.append(2)
         if on_layer:
             await on_layer(2)
         if estimate_tokens(msgs) <= target_tokens:
-            return msgs
+            return await _finish(msgs)
 
         # Layer 3 — summarize earliest 1/3 (LLM, breaker-protected)
         if not self.layer3_breaker.is_open and self.auxiliary_provider is not None:
             try:
                 msgs = await self._layer3_summarize_early(msgs)
                 self.layer3_breaker.record_success()
+                layers_run.append(3)
                 if on_layer:
                     await on_layer(3)
                 if estimate_tokens(msgs) <= target_tokens:
-                    return msgs
+                    return await _finish(msgs)
             except Exception as exc:  # noqa: BLE001 — breaker pattern
                 logger.warning("Compression layer 3 failed: %s", exc)
                 self.layer3_breaker.record_failure()
@@ -124,19 +149,21 @@ class CompressionEngine:
             try:
                 msgs = await self._layer4_rewrite(msgs)
                 self.layer4_breaker.record_success()
+                layers_run.append(4)
                 if on_layer:
                     await on_layer(4)
                 if estimate_tokens(msgs) <= target_tokens:
-                    return msgs
+                    return await _finish(msgs)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Compression layer 4 failed: %s", exc)
                 self.layer4_breaker.record_failure()
 
         # Layer 5 — hard truncate
         msgs = self._layer5_hard_truncate(msgs)
+        layers_run.append(5)
         if on_layer:
             await on_layer(5)
-        return msgs
+        return await _finish(msgs)
 
     # -- layers --------------------------------------------------------------
 
