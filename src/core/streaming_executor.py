@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from typing import TYPE_CHECKING, Callable, Awaitable
 
@@ -250,11 +251,17 @@ class StreamingExecutor:
         if config_timeout is not None:
             timeout = config_timeout
 
+        # Drop kwargs the handler doesn't declare. Some providers don't
+        # strictly validate tool-call args against the schema, so the model
+        # can invent parameters (e.g. passing 'path' to list_memory).
+        # Passing them through would raise TypeError in the handler.
+        args = _filter_kwargs(handler, tc.arguments, skip_first=needs_ctx)
+
         try:
             if needs_ctx:
-                coro = handler(self._ctx, **tc.arguments)
+                coro = handler(self._ctx, **args)
             else:
-                coro = handler(**tc.arguments)
+                coro = handler(**args)
             content = await asyncio.wait_for(coro, timeout=timeout)
             return ToolResult(
                 tool_call_id=tc.id, name=tc.name,
@@ -276,3 +283,29 @@ class StreamingExecutor:
                 tool_call_id=tc.id, name=tc.name,
                 content=f"Error: {type(e).__name__}: {e}", is_error=True,
             )
+
+
+def _filter_kwargs(handler: Callable, args: dict, skip_first: bool) -> dict:
+    try:
+        sig = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return args
+    params = list(sig.parameters.values())
+    if skip_first and params:
+        params = params[1:]
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params):
+        return args
+    accepted = {
+        p.name for p in params
+        if p.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    }
+    dropped = set(args) - accepted
+    if dropped:
+        logger.info(
+            "Dropping unexpected kwargs for %s: %s",
+            getattr(handler, "__name__", "?"), sorted(dropped),
+        )
+    return {k: v for k, v in args.items() if k in accepted}
