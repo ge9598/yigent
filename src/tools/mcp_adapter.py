@@ -151,7 +151,17 @@ class MCPClient:
         self._session_cm: Any | None = None  # the async context returned by factory
 
     async def connect(self, registry: "ToolRegistry") -> None:
-        """Open the session and register all tools into ``registry``."""
+        """Open the session and register all tools into ``registry``.
+
+        If any step after ``__aenter__`` raises (e.g. ``list_tools`` fails
+        with a transient network error), we call ``__aexit__`` on the
+        half-opened session before re-raising so the subprocess / SSE
+        connection doesn't leak.
+        """
+        if self._session_cm is not None:
+            raise RuntimeError(
+                f"MCP client for {self._server_name!r} already connected"
+            )
         if self._session_factory is not None:
             self._session_cm = self._session_factory()
         elif self._transport == "stdio":
@@ -161,31 +171,44 @@ class MCPClient:
         else:
             raise ValueError(f"Unknown MCP transport: {self._transport!r}")
 
-        self._session = await self._session_cm.__aenter__()
+        try:
+            self._session = await self._session_cm.__aenter__()
 
-        tools_response = await self._session.list_tools()
-        raw_tools = getattr(tools_response, "tools", [])
-        for mcp_tool in raw_tools:
-            tool_dict = {
-                "name": getattr(mcp_tool, "name", None),
-                "description": getattr(mcp_tool, "description", None),
-                "inputSchema": getattr(mcp_tool, "inputSchema", None),
-            }
-            if not tool_dict["name"]:
-                logger.warning("Skipping MCP tool without a name on %s", self._server_name)
-                continue
-            definition = mcp_tool_to_definition(
-                tool_dict,
-                server_name=self._server_name,
-                call_tool=self._session.call_tool,
-                permission_level=self._default_permission,
-            )
-            try:
-                registry.register(definition)
-            except ValueError as exc:
-                logger.warning(
-                    "Skipping duplicate MCP tool %s: %s", definition.name, exc
+            tools_response = await self._session.list_tools()
+            raw_tools = getattr(tools_response, "tools", [])
+            for mcp_tool in raw_tools:
+                tool_dict = {
+                    "name": getattr(mcp_tool, "name", None),
+                    "description": getattr(mcp_tool, "description", None),
+                    "inputSchema": getattr(mcp_tool, "inputSchema", None),
+                }
+                if not tool_dict["name"]:
+                    logger.warning("Skipping MCP tool without a name on %s", self._server_name)
+                    continue
+                definition = mcp_tool_to_definition(
+                    tool_dict,
+                    server_name=self._server_name,
+                    call_tool=self._session.call_tool,
+                    permission_level=self._default_permission,
                 )
+                try:
+                    registry.register(definition)
+                except ValueError as exc:
+                    logger.warning(
+                        "Skipping duplicate MCP tool %s: %s", definition.name, exc
+                    )
+        except BaseException:
+            # Partial open — release what we opened before the caller retries.
+            try:
+                import sys
+                await self._session_cm.__aexit__(*sys.exc_info())
+            except Exception as cleanup_exc:
+                logger.debug(
+                    "MCP cleanup on failed connect raised: %s", cleanup_exc,
+                )
+            self._session_cm = None
+            self._session = None
+            raise
 
     async def close(self) -> None:
         """Close the session. Safe to call multiple times."""
