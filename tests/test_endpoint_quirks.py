@@ -28,19 +28,11 @@ def test_generic_third_party_anthropic_strips_signature() -> None:
 def test_deepseek_caps_max_tokens() -> None:
     q = detect_quirks("https://api.deepseek.com/v1")
     assert q.max_tokens_cap == 8192
-    assert q.strip_cache_control is True
 
 
 def test_openai_native_has_no_max_tokens_cap() -> None:
     q = detect_quirks("https://api.openai.com/v1")
     assert q.max_tokens_cap is None
-    assert q.strip_cache_control is False
-
-
-def test_generic_openai_compat_strips_cache_control() -> None:
-    q = detect_quirks("https://dashscope.aliyuncs.com/compatible-mode/v1")
-    # Not Anthropic, not OpenAI native — treat as generic compat gateway.
-    assert q.strip_cache_control is True
 
 
 def test_empty_base_url_returns_default_quirks() -> None:

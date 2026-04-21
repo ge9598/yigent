@@ -41,10 +41,6 @@ class EndpointQuirks:
     # OpenAI o1 series rejects temperature / top_p / system role.
     forbids_sampling_params: bool = False
 
-    # Non-Anthropic endpoints don't understand ``cache_control`` blocks;
-    # sending them causes 400s on some proxies.
-    strip_cache_control: bool = False
-
 
 def detect_quirks(base_url: str) -> EndpointQuirks:
     """Return the :class:`EndpointQuirks` record for the given base_url.
@@ -72,7 +68,7 @@ def detect_quirks(base_url: str) -> EndpointQuirks:
     # --- OpenAI-protocol endpoints -------------------------------------------
 
     if "deepseek.com" in host:
-        return EndpointQuirks(max_tokens_cap=8192, strip_cache_control=True)
+        return EndpointQuirks(max_tokens_cap=8192)
 
     if host.endswith("api.openai.com"):
         # OpenAI-native. o1 restrictions are model-specific, not URL-specific;
@@ -80,8 +76,7 @@ def detect_quirks(base_url: str) -> EndpointQuirks:
         return EndpointQuirks()
 
     # Generic OpenAI-compatible (Qwen, Moonshot, local vLLM, OpenRouter, ...).
-    # Safe default: strip cache_control (Anthropic-specific) so it doesn't leak.
-    return EndpointQuirks(strip_cache_control=True)
+    return EndpointQuirks()
 
 
 def _minimax_anthropic_quirks() -> EndpointQuirks:

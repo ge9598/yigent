@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import shutil
 import sys
 
@@ -17,15 +16,6 @@ logger = logging.getLogger(__name__)
 
 _MAX_OUTPUT_CHARS = 10_000
 _TRUNCATED_TAIL = 5_000
-
-# Dangerous patterns — logged as warnings, not blocked (Phase 2 self-check).
-_DANGEROUS_PATTERNS = [
-    re.compile(r"\brm\s+-rf?\s+/(?:\s|$)"),
-    re.compile(r":\(\)\s*\{.*\|\s*:.*\}"),  # fork bomb
-    re.compile(r"\bdd\s+if=/dev/(?:zero|random|urandom)\s+of=/dev/(?:sd|hd|nvme)"),
-    re.compile(r"\bmkfs\."),
-    re.compile(r">\s*/dev/(?:sd|hd|nvme)"),
-]
 
 
 def _find_bash() -> str | None:
@@ -62,13 +52,6 @@ def _build_argv(command: str) -> tuple[list[str], str]:
     return (["sh", "-c", command], "sh")
 
 
-def _scan_dangerous(command: str) -> str | None:
-    for pat in _DANGEROUS_PATTERNS:
-        if pat.search(command):
-            return pat.pattern
-    return None
-
-
 def _truncate_output(text: str) -> str:
     if len(text) <= _MAX_OUTPUT_CHARS:
         return text
@@ -80,9 +63,6 @@ def _truncate_output(text: str) -> str:
 
 async def _bash_handler(command: str, timeout: int = 60) -> str:
     argv, shell_label = _build_argv(command)
-
-    danger = _scan_dangerous(command)
-    warning = f"[warning: dangerous pattern detected: {danger}]\n" if danger else ""
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -101,14 +81,14 @@ async def _bash_handler(command: str, timeout: int = 60) -> str:
         except ProcessLookupError:
             pass
         await proc.wait()
-        return f"Error: command timed out after {timeout}s\n" + warning
+        return f"Error: command timed out after {timeout}s"
 
     output = stdout.decode("utf-8", errors="replace") if stdout else ""
     output = _truncate_output(output)
     exit_code = proc.returncode
 
     header = f"[{shell_label} exit={exit_code}]\n"
-    return warning + header + output
+    return header + output
 
 
 register(ToolDefinition(

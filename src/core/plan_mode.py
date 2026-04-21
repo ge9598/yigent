@@ -30,6 +30,8 @@ class PlanMode:
     """
 
     # Static fallback when no registry has been bound (legacy tests).
+    # Must stay in sync with built-in READ_ONLY tools — production wires
+    # a registry via set_registry() and the dynamic allowlist supersedes.
     # Note: exit_plan_mode is WRITE permission but specially allowed.
     ALLOWED_TOOLS: frozenset[str] = frozenset({
         "read_file",
