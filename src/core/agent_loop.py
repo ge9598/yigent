@@ -428,10 +428,25 @@ async def agent_loop(
             # and can decide what to do next.
             raise
         finally:
-            if interrupted:
-                # Belt-and-suspenders: if anything went sideways above, ensure
-                # we don't leave the conversation half-extended.
-                pass
+            # Cancel and drain any dispatched tool tasks still pending on any
+            # exit path (normal completion, error, interrupt). Without this,
+            # tasks leak on:
+            #   - primary failed, no fallback configured
+            #   - primary failed, fallback build failed
+            #   - fallback stream also failed
+            #   - Ctrl+C / CancelledError
+            # Completed tasks are safe to cancel() (it's a no-op on done tasks).
+            if pending_dispatched:
+                for _tid, t in list(pending_dispatched.items()):
+                    if not t.done():
+                        t.cancel()
+                try:
+                    await asyncio.gather(
+                        *pending_dispatched.values(), return_exceptions=True,
+                    )
+                except Exception:
+                    logger.debug("Drain of pending_dispatched tasks raised", exc_info=True)
+                pending_dispatched.clear()
 
         # 6. Budget + warning
         try:
