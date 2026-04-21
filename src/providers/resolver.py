@@ -105,6 +105,7 @@ def resolve_provider(config: AgentConfig) -> LLMProvider:
         api_key=_single_key(fb) or _single_key(section),
         base_url=fb.base_url or section.base_url,
         model=fb.model or section.model,
+        debug=debug,
         credential_pool=fb_pool,
     )
 
@@ -119,12 +120,20 @@ def resolve_auxiliary(config: AgentConfig) -> LLMProvider | None:
     if aux is None:
         return None
     primary = config.provider
+    debug = config.ui.debug
+    # Prefer aux's own keys/pool; fall back to primary's pool so single-key
+    # primary configs keep working without a separate aux key. Without this
+    # fallback, multi-key primary configs silently disable aux (classifier,
+    # compression, nudge) because aux would hit "requires API key" with no key.
+    pool = _maybe_build_pool(aux) or _maybe_build_pool(primary)
     try:
         return _build_provider(
             name=aux.name or primary.name,
-            api_key=aux.api_key or primary.api_key,
+            api_key=_single_key(aux) or _single_key(primary),
             base_url=aux.base_url or primary.base_url,
             model=aux.model or primary.model,
+            debug=debug,
+            credential_pool=pool,
         )
     except Exception as exc:
         logger.warning("Auxiliary provider failed (%s), skipping", exc)
