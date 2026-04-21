@@ -101,6 +101,10 @@ async def agent_loop(
     # Track the most recently classified user message so the capability
     # router fires once per NEW user turn, not once per iteration.
     last_classified_user_msg: str | None = None
+    # Track how many conversation messages the trajectory recorder has
+    # already seen, so a user message introduced mid-session (e.g. a
+    # multi-turn chat) is attached to exactly one TurnRecord.
+    last_recorded_conversation_len: int = 0
 
     while True:
         # 1. Check budget
@@ -349,6 +353,18 @@ async def agent_loop(
                 # If in plan mode, buffer the response as plan content
                 if plan_mode.is_active and text_buffer.strip():
                     plan_mode.append(text_buffer)
+                if trajectory is not None and hasattr(trajectory, "record_turn"):
+                    user_msg_for_record = _pick_new_user_msg(
+                        conversation, last_recorded_conversation_len,
+                    )
+                    trajectory.record_turn(
+                        assistant_msg=final_msg,
+                        user_msg=user_msg_for_record,
+                        tool_calls=[],
+                        tool_results=[],
+                        reasoning_text=reasoning_text or None,
+                    )
+                    last_recorded_conversation_len = len(conversation)
                 yield FinalAnswerEvent(content=text_buffer)
                 await _fire("session_end", reason="final_answer")
                 return
@@ -376,6 +392,18 @@ async def agent_loop(
             conversation.append(assistant_msg)
             assistant_msg_appended = True
 
+            if trajectory is not None and hasattr(trajectory, "record_turn"):
+                user_msg_for_record = _pick_new_user_msg(
+                    conversation[:-1], last_recorded_conversation_len,
+                )
+                trajectory.record_turn(
+                    assistant_msg=assistant_msg,
+                    user_msg=user_msg_for_record,
+                    tool_calls=list(tool_calls),
+                    tool_results=[],
+                    reasoning_text=reasoning_text or None,
+                )
+
             # If the streaming dispatch already kicked off the tools, just
             # collect them. Otherwise (e.g. provider that doesn't emit
             # tool_call_complete until done), fall back to the batch path.
@@ -386,6 +414,9 @@ async def agent_loop(
             for result in results:
                 yield ToolResultEvent(result=result)
                 conversation.append(result.to_message())
+            if trajectory is not None and hasattr(trajectory, "attach_tool_results"):
+                trajectory.attach_tool_results(list(results))
+            last_recorded_conversation_len = len(conversation)
         except (KeyboardInterrupt, asyncio.CancelledError) as exc:
             interrupted = True
             logger.warning("Agent loop interrupted: %s", type(exc).__name__)
@@ -465,6 +496,23 @@ async def agent_loop(
             )
 
         # Loop continues — model sees tool results next turn
+
+
+def _pick_new_user_msg(
+    conversation: list[Message],
+    last_recorded_len: int,
+) -> Message | None:
+    """Return the most recent user message introduced AFTER the last recorded
+    turn boundary, or None if no new user message has arrived.
+
+    The trajectory recorder attaches each user message to exactly one turn —
+    the next turn after the user spoke. Subsequent agentic turns (tool calls
+    without new user input) record ``user_msg=None``.
+    """
+    for msg in conversation[last_recorded_len:]:
+        if msg.get("role") == "user" and msg.get("content"):
+            return msg
+    return None
 
 
 def _assemble_messages(
