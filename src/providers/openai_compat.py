@@ -33,6 +33,7 @@ class _ToolCallAccumulator:
     id: str = ""
     name: str = ""
     arguments_buffer: str = ""
+    started: bool = False  # whether tool_call_start has been emitted
 
 
 class OpenAICompatProvider(LLMProvider):
@@ -164,55 +165,106 @@ class OpenAICompatProvider(LLMProvider):
                     yield StreamChunk(type="token", data=user_text, model=model)
 
             # --- tool call deltas ---
+            # Accumulate id/name across chunks. Some providers (Azure OpenAI
+            # with long function names, certain vLLM configs) split the id
+            # and name across multiple deltas — we must not lock them in
+            # only on the first-seen delta.
             if delta.tool_calls:
                 for tc_delta in delta.tool_calls:
                     idx = tc_delta.index
-
                     if idx not in accumulators:
-                        acc = _ToolCallAccumulator(index=idx)
-                        accumulators[idx] = acc
-                        if tc_delta.id:
-                            acc.id = tc_delta.id
-                        if tc_delta.function and tc_delta.function.name:
-                            acc.name = tc_delta.function.name
+                        accumulators[idx] = _ToolCallAccumulator(index=idx)
+                    acc = accumulators[idx]
+
+                    if tc_delta.id and not acc.id:
+                        acc.id = tc_delta.id
+                    if (
+                        tc_delta.function
+                        and tc_delta.function.name
+                        and not acc.name
+                    ):
+                        acc.name = tc_delta.function.name
+
+                    # Emit tool_call_start only once we have both id and name.
+                    # Provider may send them in separate deltas.
+                    if not acc.started and acc.id and acc.name:
+                        acc.started = True
                         yield StreamChunk(
                             type="tool_call_start",
                             data={"id": acc.id, "name": acc.name},
                             model=model,
                         )
-                    else:
-                        acc = accumulators[idx]
 
                     if tc_delta.function and tc_delta.function.arguments:
                         acc.arguments_buffer += tc_delta.function.arguments
 
-            # --- stream finished ---
+            # --- stream finished via finish_reason ---
             if finish_reason is not None:
-                if finish_reason == "tool_calls" and accumulators:
-                    for acc in sorted(accumulators.values(), key=lambda a: a.index):
-                        tool_call = self._parse_accumulated(acc)
-                        yield StreamChunk(
-                            type="tool_call_complete",
-                            data=tool_call,
-                            model=model,
-                        )
-                # Flush any text the stripper was holding back (end-of-stream).
-                flush_user, flush_reason = think_stripper.finish()
-                if flush_reason:
-                    reasoning_buffer += flush_reason
-                if flush_user:
-                    yield StreamChunk(type="token", data=flush_user, model=model)
-                # OpenAI protocol has no signed thinking blocks → details=None.
-                if reasoning_buffer:
-                    yield StreamChunk(
-                        type="reasoning",
-                        data={"text": reasoning_buffer, "details": None},
-                        model=model,
-                    )
-                yield StreamChunk(type="done", data=finish_reason, model=model)
+                async for out in self._flush_stream_end(
+                    finish_reason=finish_reason,
+                    accumulators=accumulators,
+                    think_stripper=think_stripper,
+                    reasoning_buffer=reasoning_buffer,
+                    model=model,
+                ):
+                    yield out
                 return
 
+        # --- stream ended WITHOUT finish_reason (vLLM / OpenRouter edge) ---
+        # Post-loop defensive flush so accumulated tool_calls and reasoning
+        # aren't discarded.
+        async for out in self._flush_stream_end(
+            finish_reason="incomplete",
+            accumulators=accumulators,
+            think_stripper=think_stripper,
+            reasoning_buffer=reasoning_buffer,
+            model=model,
+        ):
+            yield out
+
     # -- internals -----------------------------------------------------------
+
+    async def _flush_stream_end(
+        self,
+        finish_reason: str,
+        accumulators: dict[int, _ToolCallAccumulator],
+        think_stripper: ThinkTagStripper,
+        reasoning_buffer: str,
+        model: str,
+    ) -> AsyncGenerator[StreamChunk, None]:
+        """Emit terminal events for the stream.
+
+        Factored out so both the normal finish_reason path and the
+        post-loop defensive flush (for providers that close without a
+        finish_reason, e.g. some vLLM / OpenRouter configurations) share
+        identical exit behavior.
+        """
+        # Emit accumulated tool calls. We emit on any finish_reason (including
+        # "incomplete") if accumulators are populated, because a vLLM stream
+        # that closes mid-tool-call without finish_reason would otherwise
+        # silently discard the partial tool calls.
+        if accumulators:
+            for acc in sorted(accumulators.values(), key=lambda a: a.index):
+                tool_call = self._parse_accumulated(acc)
+                yield StreamChunk(
+                    type="tool_call_complete",
+                    data=tool_call,
+                    model=model,
+                )
+        # Flush any text the stripper was holding back (end-of-stream).
+        flush_user, flush_reason = think_stripper.finish()
+        if flush_reason:
+            reasoning_buffer += flush_reason
+        if flush_user:
+            yield StreamChunk(type="token", data=flush_user, model=model)
+        # OpenAI protocol has no signed thinking blocks → details=None.
+        if reasoning_buffer:
+            yield StreamChunk(
+                type="reasoning",
+                data={"text": reasoning_buffer, "details": None},
+                model=model,
+            )
+        yield StreamChunk(type="done", data=finish_reason, model=model)
 
     @staticmethod
     def _parse_accumulated(acc: _ToolCallAccumulator) -> ToolCall:
