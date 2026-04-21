@@ -81,6 +81,12 @@ class CompressionEngine:
     layer4_keep_turns: int = 5
     layer5_keep_turns: int = 4
     hook_system: "HookSystem | None" = None
+    # Compression cursor — index into the conversation marking the boundary
+    # between "already summarized" (left) and "original" (right). Persisted
+    # across compress() calls within a session so layer 3 doesn't keep
+    # re-summarizing the same head turns. ARCHITECTURE.md §I makes this an
+    # explicit slot rather than a per-call local.
+    compression_cursor: int = 0
 
     async def compress(
         self,
@@ -180,38 +186,51 @@ class CompressionEngine:
             out.append(m)
         return out
 
-    def _layer2_dedup_file_reads(self, msgs: list[Message]) -> list[Message]:
-        """If the same file is read multiple times with identical content,
-        keep only the latest read; replace earlier ones with a stub."""
-        # Map "name:path-or-args" → list of indices into msgs that hold a
-        # tool_result for that read. We use the *prior* assistant tool_call
-        # to determine the args.
-        last_seen_content: dict[str, str] = {}
-        latest_idx: dict[str, int] = {}
+    @staticmethod
+    def _is_read_shaped_tool(name: str) -> bool:
+        """True if the tool's name suggests it returns content the model
+        might re-fetch (read_file, search_files, MCP read_*/get_*).
 
-        # Build (key, index) list for all read_file tool_results.
+        Used to widen Layer-2 dedup beyond the original {read_file, list_dir}
+        whitelist so MCP tools and search_files also benefit.
+        """
+        if name in ("read_file", "list_dir", "search_files"):
+            return True
+        # MCP tools follow `{server}__{tool}` naming; check the suffix part.
+        suffix = name.rsplit("__", 1)[-1]
+        return suffix.startswith(("read_", "get_", "fetch_", "list_", "show_"))
+
+    def _layer2_dedup_file_reads(self, msgs: list[Message]) -> list[Message]:
+        """If the same read-shaped tool is called twice with identical RESULT
+        content, keep only the latest result; replace earlier ones with a
+        stub. Dedup runs by content hash, not by call args, so two different
+        calls that happen to return the same bytes still dedup.
+        """
+        import hashlib
+        # content_hash → latest index in msgs holding it
+        latest_idx_by_hash: dict[str, int] = {}
+
         for i, m in enumerate(msgs):
             if m.get("role") != "tool":
                 continue
             tool_name = m.get("name") or ""
-            if tool_name not in ("read_file", "list_dir"):
-                continue
-            # Key by tool_call_id-prefix's preceding assistant call args.
-            tcid = m.get("tool_call_id", "")
-            key = self._lookup_call_args(msgs, tcid, tool_name)
-            if key is None:
+            if not self._is_read_shaped_tool(tool_name):
                 continue
             content = m.get("content") or ""
-            if not isinstance(content, str):
+            if not isinstance(content, str) or len(content) < 64:
+                # Too small to bother deduping — savings would be negligible.
                 continue
-            if last_seen_content.get(key) == content:
-                # Same content as previous read — older one becomes stub.
-                older = latest_idx.get(key)
-                if older is not None:
-                    msgs[older] = dict(msgs[older])  # type: ignore[index]
-                    msgs[older]["content"] = _DEDUP_MARKER  # type: ignore[index]
-            last_seen_content[key] = content
-            latest_idx[key] = i
+            # Hash by tool name + content so different tools' identical-text
+            # outputs (e.g. one's a JSON pretty-print of the other) stay
+            # distinct.
+            key = hashlib.sha256(
+                f"{tool_name}::{content}".encode("utf-8", errors="replace")
+            ).hexdigest()
+            older = latest_idx_by_hash.get(key)
+            if older is not None:
+                msgs[older] = dict(msgs[older])  # type: ignore[index]
+                msgs[older]["content"] = _DEDUP_MARKER  # type: ignore[index]
+            latest_idx_by_hash[key] = i
         return msgs
 
     @staticmethod
@@ -228,11 +247,21 @@ class CompressionEngine:
         return None
 
     async def _layer3_summarize_early(self, msgs: list[Message]) -> list[Message]:
-        """Summarize the first 1/3 of (non-system, non-already-compressed) turns."""
-        # Skip any leading system messages and already-compressed summaries.
+        """Summarize the first 1/3 of (non-system, non-already-compressed) turns.
+
+        Honors ``compression_cursor``: head turns at-or-before the cursor are
+        treated as already-summarized and skipped, so we don't re-summarize.
+        Updates the cursor after summarizing.
+        """
+        # Skip leading system messages, already-compressed summaries, and
+        # anything before the persistent cursor.
         head_skip = 0
-        for m in msgs:
-            if m.get("role") == "system" or m.get("compressed"):
+        for i, m in enumerate(msgs):
+            if (
+                m.get("role") == "system"
+                or m.get("compressed")
+                or i < self.compression_cursor
+            ):
                 head_skip += 1
             else:
                 break
@@ -251,6 +280,9 @@ class CompressionEngine:
             "content": f"[Earlier conversation summary]\n{summary_text}",
             "compressed": True,  # type: ignore[typeddict-unknown-key]
         }
+        # Advance the cursor past the new summary boundary so subsequent
+        # compress() calls don't re-summarize this region.
+        self.compression_cursor = head_skip + 1
         return msgs[:head_skip] + [summary_msg] + late
 
     async def _layer4_rewrite(self, msgs: list[Message]) -> list[Message]:
@@ -308,20 +340,15 @@ class CompressionEngine:
                 lines.append(f"  → tool {fn.get('name')}({fn.get('arguments', '')})")
         transcript = "\n".join(lines)
 
+        # Unit 9 — structured summary template (Hermes pattern). Forced section
+        # headers (Goal / Constraints / Progress / Key Decisions / Relevant
+        # Files / Next Steps / Critical Context) preserve recall quality.
+        from src.context.summary_template import (
+            SUMMARY_SYSTEM_PROMPT, render_user_prompt,
+        )
         prompt: list[Message] = [
-            {
-                "role": "system",
-                "content": (
-                    "You compress agent conversations. Produce a faithful, "
-                    "compact summary that preserves: (1) user goals, "
-                    "(2) decisions made, (3) tools called and key results, "
-                    "(4) open questions. Keep it under 500 words."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Summarize this transcript:\n\n{transcript}",
-            },
+            {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": render_user_prompt(transcript)},
         ]
 
         text = ""

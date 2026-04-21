@@ -78,6 +78,38 @@ class ToolRegistry:
     def get_definition(self, name: str) -> ToolDefinition | None:
         return self._tools.get(name)
 
+    def all(self) -> list[ToolDefinition]:
+        """All registered tool definitions. Used by PlanMode (Unit 10) to
+        compute the dynamic READ_ONLY allowlist at enter() time."""
+        return list(self._tools.values())
+
+    # Unit 10 — capability → tool-name mapping. Hardcoded for built-in tools;
+    # MCP / skill tools fall outside this map (they go through ToolSearch
+    # instead).
+    _CAPABILITY_GROUPS: dict[str, list[str]] = {
+        "search": ["web_search", "search_files"],
+        "coding": ["read_file", "write_file", "bash"],
+        "interpreter": ["python_repl", "bash"],
+        "file_ops": ["read_file", "write_file", "list_dir", "search_files"],
+    }
+
+    def activate_capability_group(self, capability: str) -> list[str]:
+        """Pre-activate all tools belonging to a capability group.
+
+        Returns the list of tools that were newly activated (already-active
+        tools are silently skipped). Unknown capability returns [].
+
+        Used by the agent loop after CapabilityRouter classifies the user's
+        intent — pre-loading the obvious tools spares a ToolSearch round-trip.
+        """
+        names = self._CAPABILITY_GROUPS.get(capability, [])
+        activated: list[str] = []
+        for name in names:
+            if name in self._tools and name not in self._activated:
+                self._activated.add(name)
+                activated.append(name)
+        return activated
+
     def get_handler(self, name: str) -> tuple | None:
         """Returns ``(handler, needs_context)`` or None if not found."""
         t = self._tools.get(name)

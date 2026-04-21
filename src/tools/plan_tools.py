@@ -116,6 +116,10 @@ register(ToolDefinition(
         },
         permission_level=PermissionLevel.READ_ONLY,
         timeout=300,  # wait up to 5 min for a human
+        # Serialize against any other ask_user / exclusive tool — only one
+        # human prompt at a time. Without this two parallel ask_user calls
+        # would race on stdin.
+        exclusive=True,
     ),
     needs_context=True,
 ))

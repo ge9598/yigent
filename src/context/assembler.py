@@ -27,9 +27,24 @@ if TYPE_CHECKING:
     from src.core.plan_mode import PlanMode
     from src.core.types import Message
     from src.memory.markdown_store import MarkdownMemoryStore
+    from src.safety.hook_system import HookSystem
     from src.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+# Three-tier compression thresholds (Unit 9 — ARCHITECTURE.md §I formula).
+# Subtract from model_context_window to get the actual byte budget.
+#
+#   warn_offset      → fire budget_warning hook, suggest the user wrap up
+#   compress_offset  → run compression engine
+#   hard_offset      → emergency hard truncate (layer 5)
+#
+# Numbers from CC source — picked so a 200K-window model still has 23K of
+# breathing room after compression and reserves.
+_WARN_OFFSET = 40_000
+_COMPRESS_OFFSET = 33_000
+_HARD_OFFSET = 23_000
 
 
 class ContextAssembler:
@@ -44,6 +59,7 @@ class ContextAssembler:
         model_context_window: int = 128_000,
         output_reserve: int = 20_000,
         safety_buffer: int = 13_000,
+        hook_system: "HookSystem | None" = None,
     ) -> None:
         self._base_system_prompt = system_prompt
         self._plan_mode = plan_mode
@@ -52,6 +68,11 @@ class ContextAssembler:
         self._model_context_window = model_context_window
         self._output_reserve = output_reserve
         self._safety_buffer = safety_buffer
+        self._hook_system = hook_system
+        # One-shot guard so we don't fire budget_warning every turn after
+        # crossing the threshold once.
+        self._warning_fired_at_turn: int = -1
+        self._turn_counter = 0
 
         # Frozen at init for prompt-cache stability. Plan-mode toggles produce
         # a *different* system message at assemble-time (Zone 3), not a mutation
@@ -66,18 +87,25 @@ class ContextAssembler:
         return self._cache
 
     @property
+    def warn_threshold(self) -> int:
+        """Tokens-used level at which budget_warning fires (~ctx-40K)."""
+        return self._model_context_window - _WARN_OFFSET
+
+    @property
+    def compress_threshold(self) -> int:
+        """Tokens-used level at which compression engine runs (~ctx-33K)."""
+        return self._model_context_window - _COMPRESS_OFFSET
+
+    @property
+    def hard_cutoff(self) -> int:
+        """Tokens-used level at which emergency hard truncation kicks in (~ctx-23K)."""
+        return self._model_context_window - _HARD_OFFSET
+
+    @property
     def usable_budget(self) -> int:
-        """Tokens left for Zone 4 (conversation) after reserves."""
-        # Subtract a static estimate of zones 1+2 (~1500 tokens for system +
-        # tool descriptions). The real number varies as tools activate; this
-        # is a conservative floor.
-        zones_1_2_estimate = 1500
-        return (
-            self._model_context_window
-            - self._output_reserve
-            - self._safety_buffer
-            - zones_1_2_estimate
-        )
+        """DEPRECATED — use compress_threshold instead. Kept for back-compat
+        with callers that still depend on a single-tier number."""
+        return self.compress_threshold
 
     async def assemble(
         self,
@@ -87,6 +115,7 @@ class ContextAssembler:
         task_type: str,
     ) -> list[Message]:
         """Build the message list for one LLM call. Compresses if needed."""
+        self._turn_counter += 1
         messages: list[Message] = []
 
         # --- Zone 1: static system prompt ---------------------------------
@@ -100,7 +129,10 @@ class ContextAssembler:
         if deferred_hint:
             messages.append({"role": "system", "content": deferred_hint})
 
-        # --- Zone 3: env + plan-mode notice + memory index ---------------
+        # --- Zone 3: plan-mode notice + memory index (system) -------------
+        # Env context now goes into Zone 4 as a prefix on the latest user
+        # message (per ARCHITECTURE.md §I-bis _inject_env spec) — putting it
+        # in Zone 3 inflated messages[] every turn.
         env_text = await env_injector.get_context(task_type)
         zone3_parts: list[str] = []
         if self._plan_mode.is_active:
@@ -109,8 +141,6 @@ class ContextAssembler:
                 "Only read-only tools, tool_search, ask_user, and exit_plan_mode "
                 "are available."
             )
-        if env_text:
-            zone3_parts.append(f"[Environment]\n{env_text}")
         memory_index = self._read_memory_index()
         if memory_index:
             zone3_parts.append(
@@ -120,18 +150,91 @@ class ContextAssembler:
         if zone3_parts:
             messages.append({"role": "system", "content": "\n\n".join(zone3_parts)})
 
-        # --- Zone 4: conversation, compressed if needed -------------------
-        zone_overhead = estimate_tokens(messages)
-        target = self.usable_budget - zone_overhead
-        if self._compression is not None and estimate_tokens(conversation) > target:
+        # --- Zone 4: conversation (env-prefixed + compressed) -------------
+        # Inject env as prefix to the latest user message (NOT a separate
+        # system message — that would inflate messages[] every turn).
+        # Falls back to a system message only if no user message exists.
+        if env_text:
+            conversation = self._inject_env(conversation, env_text)
+
+        # Live token measurement — no more hardcoded zone_1_2 guess.
+        zones_pre = estimate_tokens(messages)
+        conv_tokens = estimate_tokens(conversation)
+        total_tokens = zones_pre + conv_tokens
+
+        # Tier 1 (warn): just notify the user, don't compress yet. Fire once
+        # per session per turn-count to avoid spamming.
+        if total_tokens >= self.warn_threshold and self._warning_fired_at_turn != self._turn_counter:
+            self._warning_fired_at_turn = self._turn_counter
+            if self._hook_system is not None:
+                await self._hook_system.fire(
+                    "budget_warning",
+                    used_tokens=total_tokens,
+                    warn_threshold=self.warn_threshold,
+                    compress_threshold=self.compress_threshold,
+                    hard_cutoff=self.hard_cutoff,
+                )
+
+        # Tier 2 (compress): run the engine to fit conversation under
+        # compress_threshold (minus what zones 1-3 already consumed).
+        if total_tokens >= self.compress_threshold and self._compression is not None:
+            target = self.compress_threshold - zones_pre
             logger.info(
-                "Compressing conversation: %d > target %d",
-                estimate_tokens(conversation), target,
+                "Compressing conversation: total %d ≥ compress %d, target %d",
+                total_tokens, self.compress_threshold, target,
             )
             conversation = await self._compression.compress(conversation, target)
+            conv_tokens = estimate_tokens(conversation)
+            total_tokens = zones_pre + conv_tokens
+
+        # Tier 3 (hard cutoff): emergency truncation. Even if compression ran,
+        # if we're STILL over the hard cutoff we keep only the last few turns.
+        if total_tokens >= self.hard_cutoff:
+            target = self.hard_cutoff - zones_pre
+            logger.warning(
+                "Hard cutoff: total %d ≥ hard %d, emergency truncation to %d",
+                total_tokens, self.hard_cutoff, target,
+            )
+            if self._compression is not None:
+                # Engine's layer-5 (hard truncate) is the right tool — call it
+                # by giving an impossibly-tight target so other layers no-op
+                # and layer 5 fires.
+                conversation = await self._compression.compress(conversation, target)
+
         messages.extend(conversation)
 
         return messages
+
+    def _inject_env(
+        self, conversation: list["Message"], env_text: str,
+    ) -> list["Message"]:
+        """Prefix env context onto the most recent user message.
+
+        Mutates a copy, not the original. If there is no user message yet
+        (very first turn before user input is appended), append env as a
+        standalone system message — back-compat fallback.
+        """
+        # Find the index of the last user message.
+        last_user_idx = -1
+        for i in range(len(conversation) - 1, -1, -1):
+            if conversation[i].get("role") == "user":
+                last_user_idx = i
+                break
+        if last_user_idx < 0:
+            # No user message — fall back to system message.
+            return list(conversation) + [
+                {"role": "system", "content": f"[Environment]\n{env_text}"}
+            ]
+        # Build a copy of the user message with env prefix injected.
+        out = list(conversation)
+        existing = out[last_user_idx]
+        existing_content = existing.get("content") or ""
+        new_msg: "Message" = {
+            **existing,  # preserve role + any other fields
+            "content": f"[Environment]\n{env_text}\n\n{existing_content}",
+        }
+        out[last_user_idx] = new_msg
+        return out
 
     # -- internals -----------------------------------------------------------
 

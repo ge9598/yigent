@@ -128,6 +128,216 @@ class TestStreamingExecutor:
         assert "unknown" in results[0].content.lower()
 
 
+class TestStreamingDispatch:
+    """Unit 7 — dispatch() starts execution immediately so the agent loop can
+    overlap tool work with continued model streaming."""
+
+    @pytest.mark.asyncio
+    async def test_dispatch_returns_task_immediately(self):
+        """dispatch() must return before the tool finishes — that's the point."""
+        from src.core.types import ToolDefinition, ToolSchema
+        reg = ToolRegistry()
+
+        async def slow(text: str) -> str:
+            await asyncio.sleep(0.3)
+            return text
+
+        reg.register(ToolDefinition(
+            name="slow", description="slow", handler=slow,
+            schema=ToolSchema(
+                name="slow", description="slow",
+                parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+                permission_level=PermissionLevel.READ_ONLY, timeout=5,
+            ),
+        ))
+        ctx = _make_ctx(reg)
+        executor = StreamingExecutor(reg, ctx)
+
+        tc = ToolCall(id="1", name="slow", arguments={"text": "x"})
+        t0 = asyncio.get_running_loop().time()
+        task = await executor.dispatch(
+            tc, AsyncMock(return_value=PermissionDecision.ALLOW))
+        t1 = asyncio.get_running_loop().time()
+        # Dispatch returned without waiting for the tool to finish.
+        assert (t1 - t0) < 0.1
+        assert not task.done()
+        # Now wait for it.
+        results = await executor.collect({"1": task}, [tc])
+        assert results[0].content == "x"
+
+    @pytest.mark.asyncio
+    async def test_collect_preserves_input_order(self):
+        from src.core.types import ToolDefinition, ToolSchema
+        reg = ToolRegistry()
+
+        async def fast(text: str) -> str:
+            return f"fast: {text}"
+
+        async def slow(text: str) -> str:
+            await asyncio.sleep(0.2)
+            return f"slow: {text}"
+
+        for n, h in [("fast", fast), ("slow", slow)]:
+            reg.register(ToolDefinition(
+                name=n, description=n, handler=h,
+                schema=ToolSchema(
+                    name=n, description=n,
+                    parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+                    permission_level=PermissionLevel.READ_ONLY, timeout=5,
+                ),
+            ))
+        ctx = _make_ctx(reg)
+        executor = StreamingExecutor(reg, ctx)
+        tc1 = ToolCall(id="1", name="slow", arguments={"text": "a"})
+        tc2 = ToolCall(id="2", name="fast", arguments={"text": "b"})
+        t1 = await executor.dispatch(tc1, AsyncMock(return_value=PermissionDecision.ALLOW))
+        t2 = await executor.dispatch(tc2, AsyncMock(return_value=PermissionDecision.ALLOW))
+        results = await executor.collect({"1": t1, "2": t2}, [tc1, tc2])
+        # Even though tc2 finishes first, results come back in input order.
+        assert results[0].content == "slow: a"
+        assert results[1].content == "fast: b"
+
+    @pytest.mark.asyncio
+    async def test_exclusive_tools_serialized_against_each_other(self):
+        """Two exclusive tools dispatched concurrently must run serially —
+        the second waits for the first to finish."""
+        from src.core.types import ToolDefinition, ToolSchema
+        reg = ToolRegistry()
+
+        running_concurrently = {"max": 0, "current": 0}
+
+        async def exclusive_op(text: str) -> str:
+            running_concurrently["current"] += 1
+            running_concurrently["max"] = max(
+                running_concurrently["max"], running_concurrently["current"]
+            )
+            await asyncio.sleep(0.1)
+            running_concurrently["current"] -= 1
+            return text
+
+        reg.register(ToolDefinition(
+            name="excl", description="excl", handler=exclusive_op,
+            schema=ToolSchema(
+                name="excl", description="excl",
+                parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+                permission_level=PermissionLevel.READ_ONLY, timeout=5,
+                exclusive=True,
+            ),
+        ))
+        ctx = _make_ctx(reg)
+        executor = StreamingExecutor(reg, ctx)
+        cb = AsyncMock(return_value=PermissionDecision.ALLOW)
+        calls = [
+            ToolCall(id=str(i), name="excl", arguments={"text": str(i)})
+            for i in range(3)
+        ]
+        tasks = {}
+        for tc in calls:
+            tasks[tc.id] = await executor.dispatch(tc, cb)
+        results = await executor.collect(tasks, calls)
+        # Three exclusive calls — at most one ran at a time.
+        assert running_concurrently["max"] == 1
+        assert [r.content for r in results] == ["0", "1", "2"]
+
+    @pytest.mark.asyncio
+    async def test_non_exclusive_tools_run_in_parallel(self):
+        """Sanity: regular tools still parallelize via dispatch."""
+        from src.core.types import ToolDefinition, ToolSchema
+        reg = ToolRegistry()
+
+        running_concurrently = {"max": 0, "current": 0}
+
+        async def parallel_op(text: str) -> str:
+            running_concurrently["current"] += 1
+            running_concurrently["max"] = max(
+                running_concurrently["max"], running_concurrently["current"]
+            )
+            await asyncio.sleep(0.1)
+            running_concurrently["current"] -= 1
+            return text
+
+        reg.register(ToolDefinition(
+            name="par", description="par", handler=parallel_op,
+            schema=ToolSchema(
+                name="par", description="par",
+                parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+                permission_level=PermissionLevel.READ_ONLY, timeout=5,
+                # exclusive=False (the default)
+            ),
+        ))
+        ctx = _make_ctx(reg)
+        executor = StreamingExecutor(reg, ctx)
+        cb = AsyncMock(return_value=PermissionDecision.ALLOW)
+        calls = [
+            ToolCall(id=str(i), name="par", arguments={"text": str(i)})
+            for i in range(3)
+        ]
+        tasks = {tc.id: await executor.dispatch(tc, cb) for tc in calls}
+        await executor.collect(tasks, calls)
+        # With 3 truly-parallel sleeps, max concurrency should be 3.
+        assert running_concurrently["max"] == 3
+
+
+class TestSiblingAbort:
+    """Unit 6 — fatal tool errors must cancel pending siblings."""
+
+    @pytest.mark.asyncio
+    async def test_normal_exception_lets_siblings_finish(self):
+        """A regular exception in one tool returns an error stub; siblings
+        still execute to completion. (Existing Phase 1 behavior.)"""
+        reg = _make_registry()
+        ctx = _make_ctx(reg)
+        executor = StreamingExecutor(reg, ctx)
+        calls = [
+            ToolCall(id="1", name="fail", arguments={"text": "x"}),
+            ToolCall(id="2", name="echo", arguments={"text": "ok"}),
+        ]
+        results = await executor.execute_tool_calls(
+            calls, permission_callback=AsyncMock(return_value=PermissionDecision.ALLOW))
+        result_by_id = {r.tool_call_id: r for r in results}
+        assert result_by_id["1"].is_error
+        assert not result_by_id["2"].is_error
+        assert result_by_id["2"].content == "echo: ok"
+
+    @pytest.mark.asyncio
+    async def test_fatal_tool_error_cancels_siblings(self):
+        """A FatalToolError in one tool must propagate and cancel pending siblings."""
+        from src.core.types import FatalToolError, ToolDefinition, ToolSchema
+
+        reg = ToolRegistry()
+        siblings_finished: list[str] = []
+
+        async def fatal_handler(text: str) -> str:
+            raise FatalToolError("the world is broken")
+
+        async def slow_sibling(text: str) -> str:
+            await asyncio.sleep(0.5)
+            siblings_finished.append(text)
+            return f"finished: {text}"
+
+        for name, handler in [("fatal", fatal_handler), ("slow", slow_sibling)]:
+            reg.register(ToolDefinition(
+                name=name, description=name, handler=handler,
+                schema=ToolSchema(
+                    name=name, description=name,
+                    parameters={"type": "object", "properties": {"text": {"type": "string"}}},
+                    permission_level=PermissionLevel.READ_ONLY, timeout=2,
+                ),
+            ))
+
+        ctx = _make_ctx(reg)
+        executor = StreamingExecutor(reg, ctx)
+        calls = [
+            ToolCall(id="1", name="fatal", arguments={"text": "boom"}),
+            ToolCall(id="2", name="slow", arguments={"text": "should-be-cancelled"}),
+        ]
+        with pytest.raises(FatalToolError):
+            await executor.execute_tool_calls(
+                calls, permission_callback=AsyncMock(return_value=PermissionDecision.ALLOW))
+        # The slow sibling never appended because TaskGroup cancelled it.
+        assert siblings_finished == []
+
+
 class TestPostToolUseHook:
     """Unit 1 — executor must fire post_tool_use after each handler returns."""
 

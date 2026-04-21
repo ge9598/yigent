@@ -119,9 +119,17 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 | + Phase 2b Unit 5 (multi-agent) | 250 |
 | + auxiliary provider defaults to clone of primary | 257 |
 | + reasoning unification (endpoint_quirks + thinking blocks + `<think>` FSM) | 292 |
+| + parity remediation Units 0-4 (hooks 8/8 + MCP SSE + 401/402/429 + cross-provider routing) | 322 |
+| + parity remediation Unit 5 (stop_reason + provider fallback) | 325 |
+| + parity remediation Unit 6 (interruption tombstone + sibling abort) | 329 |
+| + parity remediation Unit 7 (real streaming tool dispatch + exclusive serialization) | 333 |
+| + parity remediation Unit 8 (Fork output_file + plan-mode CLI approval) | 338 |
+| + parity remediation Unit 9 (three-tier thresholds + Hermes summary template + cursor + L2 widen) | 351 |
+| + parity remediation Unit 10 (YOLO aux-LLM + plan dynamic allowlist + destructive confirm + shared budget + capability classifier) | 372 |
 
 ## Current focus
 
-> Phase 2b complete — all five units landed. Next: Phase 3 (learning loop
-> + eval). Periodic nudge, skill auto-creation, trajectory recording,
-> 4-domain benchmark.
+> Parity remediation complete — all 11 units delivered (plan:
+> ~/.claude/plans/idempotent-swinging-flask.md). 372 tests passing.
+> Phase 3 (learning loop + eval) starts next: periodic nudge,
+> skill auto-creation, trajectory recording, 4-domain benchmark.

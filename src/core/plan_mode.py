@@ -8,16 +8,28 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from src.safety.hook_system import HookSystem
+    from src.tools.registry import ToolRegistry
 
 
 class PlanMode:
-    """Session-level plan mode state."""
+    """Session-level plan mode state.
 
-    # Tools permitted while plan mode is active.
+    The allowlist of permitted tools is computed dynamically when ``enter()``
+    is called: every READ_ONLY tool in the registry plus ``exit_plan_mode``
+    (WRITE-level but specially allowed). This means MCP tools and auto-created
+    skills tagged READ_ONLY flow through plan mode automatically — no need
+    to maintain a hardcoded list.
+
+    For setups without a registry (e.g. tests), a static fallback set is
+    used. Keep the fallback in sync with the canonical built-in READ_ONLY
+    tools.
+    """
+
+    # Static fallback when no registry has been bound (legacy tests).
     # Note: exit_plan_mode is WRITE permission but specially allowed.
     ALLOWED_TOOLS: frozenset[str] = frozenset({
         "read_file",
@@ -27,6 +39,8 @@ class PlanMode:
         "tool_search",
         "ask_user",
         "exit_plan_mode",
+        "read_memory",
+        "list_memory",
     })
 
     def __init__(
@@ -42,6 +56,12 @@ class PlanMode:
         self._hook_system = hook_system
         self._approved: bool = False
         self._rejection_note: str | None = None
+        # Dynamic allowlist computed at enter() time from a registry.
+        # None means "not bound" — fall back to the static ALLOWED_TOOLS.
+        self._dynamic_allowlist: frozenset[str] | None = None
+        # Optional registry the dynamic allowlist queries. set_registry()
+        # binds it; without binding we use ALLOWED_TOOLS.
+        self._registry: Any = None  # ToolRegistry, but avoid import cycle
 
     # ------------------------------------------------------------------
     # State
@@ -59,14 +79,49 @@ class PlanMode:
     # Transitions
     # ------------------------------------------------------------------
 
+    def set_registry(self, registry: "ToolRegistry") -> None:
+        """Bind a tool registry so the allowlist can be computed dynamically.
+
+        Without this binding, plan mode falls back to the static
+        ``ALLOWED_TOOLS`` frozenset (back-compat for tests).
+        """
+        self._registry = registry
+
     def enter(self, session_id: str) -> None:
-        """Activate plan mode for the given session."""
+        """Activate plan mode for the given session.
+
+        Recomputes the dynamic allowlist from the bound registry: every
+        READ_ONLY tool is allowed, plus ``exit_plan_mode`` (WRITE-level but
+        specially allowed). MCP tools registered as READ_ONLY automatically
+        flow through.
+        """
         self._active = True
         self._session_id = session_id
         self._entered_at = dt.datetime.now()
         self._plan_buffer = ""
         self._approved = False
         self._rejection_note = None
+        self._dynamic_allowlist = self._compute_allowlist()
+
+    def _compute_allowlist(self) -> frozenset[str] | None:
+        """Build the allowlist from the bound registry, or None to fall back.
+
+        Lazy import to avoid the ToolRegistry import cycle.
+        """
+        if self._registry is None:
+            return None
+        from src.core.types import PermissionLevel
+        try:
+            all_tools = self._registry.all()
+        except AttributeError:
+            return None
+        names: set[str] = set()
+        for defn in all_tools:
+            level = getattr(defn.schema, "permission_level", None)
+            if level == PermissionLevel.READ_ONLY:
+                names.add(defn.name)
+        names.add("exit_plan_mode")  # special — WRITE but always allowed
+        return frozenset(names)
 
     @property
     def is_approved(self) -> bool:
@@ -152,7 +207,12 @@ class PlanMode:
     # ------------------------------------------------------------------
 
     def is_tool_allowed(self, tool_name: str) -> bool:
-        """While active: only whitelisted tools allowed. While inactive: all allowed."""
+        """While active: only whitelisted tools allowed. While inactive: all allowed.
+
+        Uses the dynamic allowlist (computed from registry at ``enter()``)
+        when bound, otherwise falls back to the static ``ALLOWED_TOOLS``.
+        """
         if not self._active:
             return True
-        return tool_name in self.ALLOWED_TOOLS
+        allowlist = self._dynamic_allowlist if self._dynamic_allowlist is not None else self.ALLOWED_TOOLS
+        return tool_name in allowlist

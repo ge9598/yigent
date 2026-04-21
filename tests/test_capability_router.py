@@ -125,3 +125,90 @@ def test_plan_mode_triggered_event_exists():
     # Default reason
     ev2 = PlanModeTriggeredEvent()
     assert ev2.reason == ""
+
+
+# ---------------------------------------------------------------------------
+# Unit 10 — capabilities classifier output
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_classifier_returns_capabilities():
+    provider = _FakeAuxProvider(
+        '{"strategy": "direct", "reason": "ok", '
+        '"capabilities": ["coding", "file_ops"]}'
+    )
+    router = CapabilityRouter(aux_provider=provider)
+    d = await router.classify("edit foo.py and bar.py")
+    assert d.strategy == "direct"
+    assert d.capabilities == ["coding", "file_ops"]
+
+
+@pytest.mark.asyncio
+async def test_classifier_filters_invalid_capabilities():
+    provider = _FakeAuxProvider(
+        '{"strategy": "direct", "reason": "ok", '
+        '"capabilities": ["coding", "telepathy", "search"]}'
+    )
+    router = CapabilityRouter(aux_provider=provider)
+    d = await router.classify("x")
+    assert "telepathy" not in d.capabilities
+    assert d.capabilities == ["coding", "search"]
+
+
+@pytest.mark.asyncio
+async def test_classifier_missing_capabilities_field_defaults_empty():
+    provider = _FakeAuxProvider('{"strategy": "direct", "reason": "ok"}')
+    router = CapabilityRouter(aux_provider=provider)
+    d = await router.classify("x")
+    assert d.capabilities == []
+
+
+def test_routing_decision_default_capabilities():
+    d = RoutingDecision(strategy="direct")
+    assert d.capabilities == []
+
+
+def test_registry_activate_capability_group():
+    """Registry pre-loads the obvious deferred tools for a capability group.
+
+    Non-deferred tools auto-activate at register time, so we use deferred=True
+    here to verify the capability-group activation path actually fires.
+    """
+    from src.core.types import (
+        PermissionLevel, ToolDefinition, ToolSchema,
+    )
+    from src.tools.registry import ToolRegistry
+
+    reg = ToolRegistry()
+
+    async def noop(**kw):
+        return ""
+
+    for name in ("read_file", "write_file", "bash", "web_search", "search_files"):
+        reg.register(ToolDefinition(
+            name=name, description=name, handler=noop,
+            schema=ToolSchema(
+                name=name, description=name,
+                parameters={"type": "object", "properties": {}},
+                permission_level=PermissionLevel.READ_ONLY,
+                deferred=True,  # so capability_group has work to do
+            ),
+        ))
+    # Sanity: nothing activated yet
+    assert reg.is_activated("read_file") is False
+
+    activated = reg.activate_capability_group("coding")
+    assert "read_file" in activated
+    assert "write_file" in activated
+    assert "bash" in activated
+    # Now they're activated.
+    assert reg.is_activated("read_file") is True
+    # Calling again should not re-activate (idempotent).
+    re_activated = reg.activate_capability_group("coding")
+    assert re_activated == []
+
+
+def test_registry_unknown_capability_returns_empty():
+    from src.tools.registry import ToolRegistry
+    reg = ToolRegistry()
+    assert reg.activate_capability_group("telepathy") == []

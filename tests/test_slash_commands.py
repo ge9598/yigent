@@ -188,3 +188,23 @@ async def test_default_unknown_reporter_prints_to_stdout(capsys) -> None:
     out = capsys.readouterr().out
     assert "Unknown command: /bogus" in out
     assert "/help" in out
+
+
+# ---------------------------------------------------------------------------
+# Unit 8 — async commands (used by /approve, /reject for plan-mode approval)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_async_cmd_method_is_awaited():
+    """Cmd methods returning a coroutine must be awaited by dispatch()."""
+    calls = []
+
+    class H:
+        async def cmd_async_thing(self, args: str) -> None:
+            """Async."""
+            calls.append(args)
+
+    d = SlashDispatcher(H())
+    result = await d.dispatch("/async-thing hi there")
+    assert result is DispatchResult.HANDLED
+    assert calls == ["hi there"]

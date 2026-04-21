@@ -57,11 +57,13 @@ class PermissionGate:
         ctx: ToolContext,
         hooks: HookSystem | None = None,
         yolo_mode: bool = False,
+        aux_provider: object | None = None,
     ) -> None:
         self._registry = registry
         self._ctx = ctx
         self._hooks = hooks
         self._yolo = yolo_mode
+        self._aux_provider = aux_provider
         self._last_block_reason: str = ""
 
     # -- public --------------------------------------------------------------
@@ -127,10 +129,12 @@ class PermissionGate:
         # Layer 5 — permission level (with layer 2's ASK override honored)
         level = defn.schema.permission_level
         if level == PermissionLevel.DESTRUCTIVE:
-            self._last_block_reason = (
-                f"Error: '{tc.name}' is destructive and always blocked"
-            )
-            return PermissionDecision.BLOCK
+            # Unit 10 — destructive tools require explicit user confirmation
+            # (not unconditional block). Per ARCHITECTURE.md §G "require
+            # confirmation for destructive". The user must respond to the
+            # prompt; YOLO does NOT bypass this — destructive is the one
+            # category that always interrupts.
+            return await callback(tc)
         if validator_wants_ask:
             # Validator explicitly asked for user confirmation — override the
             # default auto-allow path. YOLO mode does NOT suppress this: the
@@ -139,10 +143,113 @@ class PermissionGate:
         if level == PermissionLevel.READ_ONLY:
             return PermissionDecision.ALLOW
         if self._yolo:
-            # YOLO: skip user prompts for write/execute. Shadow classifier
-            # for dangerous ops is a Phase 2b add — for now YOLO is honest.
+            # Unit 10 — YOLO shadow classifier. A regex pre-filter catches
+            # the obvious-bad operations (`rm -rf /`, fork bombs, …); for
+            # everything else, an aux-LLM classifies safe / risky / dangerous.
+            # Dangerous → BLOCK, risky → ask user, safe → auto-allow.
+            shadow = await self._yolo_shadow_classify(tc)
+            if shadow == "dangerous":
+                self._last_block_reason = (
+                    f"Error: '{tc.name}' blocked by YOLO shadow classifier "
+                    "(dangerous operation detected)"
+                )
+                return PermissionDecision.BLOCK
+            if shadow == "risky":
+                return await callback(tc)
             return PermissionDecision.ALLOW
         return await callback(tc)
+
+    # -- Unit 10 — YOLO shadow classifier -----------------------------------
+
+    # Regex pre-filter: obviously-bad bash patterns. Hits short-circuit to
+    # "dangerous" without paying for an aux-LLM call.
+    _YOLO_DANGER_PATTERNS = (
+        r"\brm\s+-rf?\s+/(?:\s|$)",          # rm -rf /
+        r"\brm\s+-rf?\s+~(?:\s|$)",          # rm -rf ~
+        r"\bdd\s+.*of=/dev/(?:sd|nvme|hd)",  # dd of=/dev/sda
+        r"\bmkfs\b",                          # mkfs.*
+        r":\(\)\s*\{[^}]*:\|\s*:[^}]*\}\s*;\s*:",  # bash fork bomb
+        r"\bcurl\b[^|]*\|\s*(?:sudo\s+)?(?:bash|sh)\b",   # curl ... | sh
+        r"\bwget\b[^|]*\|\s*(?:sudo\s+)?(?:bash|sh)\b",   # wget ... | sh
+        r"\bchmod\s+(?:-R\s+)?[0-7]*7[0-7]*\s+/(?:bin|etc|usr|var)",
+        r"\bformat\s+[a-z]:",                # Windows: format c:
+        r">\s*/dev/sd[a-z]",                 # > /dev/sda
+    )
+
+    async def _yolo_shadow_classify(self, tc: ToolCall) -> str:
+        """Classify a tool call as 'safe' | 'risky' | 'dangerous'.
+
+        Step 1 — regex pre-filter on bash-shaped args (catches the canonical
+        bad commands without an LLM call).
+        Step 2 — aux-LLM classification using the gate's auxiliary provider.
+
+        Returns 'safe' on any error path so YOLO failures don't paralyze
+        the agent (the operator already opted into YOLO).
+        """
+        import re
+        # Pull the most likely "command" string from the args. bash takes
+        # ``command``; other tools may have different shapes — string-flatten.
+        flat_args = " ".join(
+            str(v) for v in tc.arguments.values() if isinstance(v, (str, int, float))
+        )
+        for pattern in self._YOLO_DANGER_PATTERNS:
+            if re.search(pattern, flat_args):
+                logger.warning("YOLO regex caught dangerous: %s", pattern)
+                return "dangerous"
+
+        # Aux-LLM step (skipped if no provider).
+        provider = getattr(self, "_aux_provider", None)
+        if provider is None:
+            return "safe"
+        # Cache by (tool, args-hash) to avoid re-classifying identical calls.
+        import hashlib, json
+        cache = getattr(self, "_yolo_cache", None)
+        if cache is None:
+            cache = {}
+            self._yolo_cache = cache
+        key = hashlib.sha256(
+            f"{tc.name}::{json.dumps(tc.arguments, sort_keys=True, default=str)}".encode()
+        ).hexdigest()
+        if key in cache:
+            return cache[key]
+
+        prompt_msgs = [
+            {
+                "role": "system",
+                "content": (
+                    "You classify tool calls for safety. Reply with EXACTLY one "
+                    "word: 'safe' (no harm possible), 'risky' (could cause harm "
+                    "in edge cases — recommend user confirmation), or 'dangerous' "
+                    "(would cause data loss, system damage, or security breach)."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Tool: {tc.name}\n"
+                    f"Arguments: {json.dumps(tc.arguments, default=str)}\n"
+                    "Classification:"
+                ),
+            },
+        ]
+        try:
+            text = ""
+            async for chunk in provider.stream_message(
+                messages=prompt_msgs, temperature=0.0,
+            ):
+                if chunk.type == "token":
+                    text += chunk.data
+                elif chunk.type == "done":
+                    break
+            classification = text.strip().lower().split()[0] if text.strip() else "safe"
+            if classification not in ("safe", "risky", "dangerous"):
+                classification = "safe"  # unknown = err on the side of letting
+                                         # the operator proceed (they enabled YOLO)
+            cache[key] = classification
+            return classification
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("YOLO shadow classifier failed: %s — defaulting safe", exc)
+            return "safe"
 
     # -- internals -----------------------------------------------------------
 

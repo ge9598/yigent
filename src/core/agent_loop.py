@@ -1,6 +1,7 @@
 """Central async generator implementing the ReAct cycle."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
@@ -9,9 +10,9 @@ from typing import TYPE_CHECKING, Any, Callable, Awaitable
 from src.core.iteration_budget import BudgetExhausted
 from src.core.types import (
     BudgetExhaustedEvent, ErrorEvent, Event, FinalAnswerEvent, Message,
-    PermissionDecision, PlanModeTriggeredEvent, ReasoningDeltaEvent,
-    StreamChunk, ToolCall,
-    ToolCallStartEvent, ToolResultEvent, TokenEvent, TurnStartedEvent,
+    PermissionDecision, PlanModeTriggeredEvent, ProviderFallbackEvent,
+    ReasoningDeltaEvent, StreamChunk, ToolCall, ToolCallStartEvent,
+    ToolResultEvent, TokenEvent, TruncatedEvent, TurnStartedEvent,
 )
 
 if TYPE_CHECKING:
@@ -136,6 +137,10 @@ async def agent_loop(
         ):
             last_classified_user_msg = last_user_text
             decision = await capability_router.classify(last_user_text)
+            # Unit 10 — pre-activate tools the classifier predicts we'll need.
+            # Avoids a ToolSearch round-trip for the obvious cases.
+            for capability in decision.capabilities:
+                tools.activate_capability_group(capability)
             if decision.strategy == "plan_then_execute":
                 plan_mode.enter(session_id="auto")
                 yield PlanModeTriggeredEvent(reason=decision.reason)
@@ -160,90 +165,273 @@ async def agent_loop(
             env_text = await env_injector.get_context(task_type)
             messages = _assemble_messages(conversation, tools, env_text, plan_mode)
 
-        # 3. Stream LLM response
+        # 3. Stream LLM response (with single-turn fallback retry on failure)
         active_schemas = tools.get_active_schemas()
+
+        # Unit 7 — pending dispatched tool tasks, populated mid-stream.
+        # Maps tool_call_id → asyncio.Task[ToolResult]. Awaited after the
+        # stream's ``done`` chunk via executor.collect().
+        pending_dispatched: dict[str, "asyncio.Task[Any]"] = {}
+
+        async def _stream_one(prov: "LLMProvider", model_name: str | None):
+            """Drain one stream attempt, returning collected state.
+
+            On tool_call_complete the tool is dispatched IMMEDIATELY (Unit 7
+            — real streaming tool execution) so it begins running while the
+            model is still emitting other tokens / tool calls. The returned
+            state's tool_calls list preserves emission order; the caller
+            collects results via ``executor.collect(pending_dispatched, …)``.
+
+            Returns ``(text, tool_calls, reasoning_text, reasoning_details,
+            finish_reason, did_yield_tokens)``. The caller decides what to do
+            with truncation / failure. Errors propagate so the caller can
+            decide whether to fall back.
+            """
+            text = ""
+            tcs: list[ToolCall] = []
+            r_text = ""
+            r_details: list[dict[str, Any]] | None = None
+            finish: str | None = None
+            yielded_anything = False
+            async for ch in prov.stream_message(
+                messages=messages,
+                model=model_name,
+                tools=active_schemas if active_schemas else None,
+                temperature=0.0,
+            ):
+                if ch.type == "token":
+                    text += ch.data
+                    yielded_anything = True
+                    yield ("event", TokenEvent(token=ch.data))
+                elif ch.type == "tool_call_start":
+                    yielded_anything = True
+                    yield ("event", ToolCallStartEvent(
+                        tool_call=ToolCall(
+                            id=ch.data.get("id", ""),
+                            name=ch.data.get("name", ""),
+                            arguments={},
+                        )
+                    ))
+                elif ch.type == "tool_call_complete":
+                    tcs.append(ch.data)
+                    # Streaming dispatch: kick off execution NOW instead of
+                    # waiting for the stream to finish. Subsequent siblings
+                    # (and continued model tokens) overlap with this tool
+                    # actually doing work.
+                    try:
+                        task = await executor.dispatch(ch.data, perm_cb)
+                        pending_dispatched[ch.data.id] = task
+                    except Exception as exc:
+                        logger.error(
+                            "dispatch failed for %s: %s", ch.data.name, exc,
+                        )
+                elif ch.type == "reasoning_delta":
+                    yield ("event", ReasoningDeltaEvent(fragment=ch.data))
+                elif ch.type == "reasoning":
+                    data = ch.data or {}
+                    r_text = data.get("text", "") or r_text
+                    details = data.get("details")
+                    if details:
+                        r_details = details
+                elif ch.type == "done":
+                    finish = ch.data if isinstance(ch.data, str) else None
+                    break
+            yield ("result", (text, tcs, r_text, r_details, finish, yielded_anything))
+
+        async def _drive_with_fallback():
+            """Try primary provider; on failure (and if fallback configured),
+            retry once with the fallback. Each yielded value is ``("event", ev)``
+            for UI events, or ``("result", state)`` for the final state tuple.
+            On total failure yields ``("error", exc)``.
+            """
+            try:
+                async for kind, payload in _stream_one(active_provider, active_model):
+                    yield kind, payload
+                return
+            except Exception as exc:
+                primary_failure = exc
+                logger.warning("Primary provider failed mid-stream: %s", exc)
+                # Cancel any tools the primary stream already dispatched —
+                # we don't want their results polluting the fallback's run.
+                for tid, t in list(pending_dispatched.items()):
+                    if not t.done():
+                        t.cancel()
+                pending_dispatched.clear()
+
+            # Decide whether to fall back. Conditions: a fallback exists AND
+            # we haven't already yielded substantial content (don't replay
+            # tokens the user already saw).
+            from src.providers.resolver import _build_provider, _maybe_build_pool, _single_key
+            section = config.provider
+            if section.fallback is None:
+                yield "error", primary_failure
+                return
+            try:
+                fb = section.fallback
+                fb_pool = _maybe_build_pool(fb)
+                fallback_provider = _build_provider(
+                    name=fb.name or section.name,
+                    api_key=_single_key(fb) or _single_key(section),
+                    base_url=fb.base_url or section.base_url,
+                    model=fb.model or section.model,
+                    debug=config.ui.debug,
+                    credential_pool=fb_pool,
+                )
+            except Exception as build_exc:
+                logger.error("Could not build fallback provider: %s", build_exc)
+                yield "error", primary_failure
+                return
+
+            yield "event", ProviderFallbackEvent(
+                primary=section.name,
+                fallback=fb.name or section.name,
+                reason=str(primary_failure),
+            )
+            try:
+                async for kind, payload in _stream_one(
+                    fallback_provider, fb.model or active_model,
+                ):
+                    yield kind, payload
+            except Exception as fb_exc:
+                logger.error("Fallback provider also failed: %s", fb_exc)
+                yield "error", fb_exc
+
         text_buffer = ""
         tool_calls: list[ToolCall] = []
         reasoning_text = ""
         reasoning_details: list[dict[str, Any]] | None = None
+        finish_reason: str | None = None
+        stream_failed = False
+        # Unit 6 — tombstone bookkeeping. Track tool_use ids the model emitted
+        # so that on Ctrl+C / cancellation we can synthesize matching error
+        # tool_results. Anthropic-format providers reject the next turn if a
+        # tool_use is missing its tool_result.
+        emitted_tool_use_ids: list[tuple[str, str]] = []  # (id, name)
+        assistant_msg_appended = False
+        interrupted = False
 
         try:
-            async for chunk in active_provider.stream_message(
-                messages=messages,
-                model=active_model,
-                tools=active_schemas if active_schemas else None,
-                temperature=0.0,
-            ):
-                if chunk.type == "token":
-                    text_buffer += chunk.data
-                    yield TokenEvent(token=chunk.data)
-                elif chunk.type == "tool_call_start":
-                    yield ToolCallStartEvent(
-                        tool_call=ToolCall(
-                            id=chunk.data.get("id", ""),
-                            name=chunk.data.get("name", ""),
-                            arguments={},
+            async for kind, payload in _drive_with_fallback():
+                if kind == "event":
+                    if isinstance(payload, ToolCallStartEvent):
+                        emitted_tool_use_ids.append(
+                            (payload.tool_call.id, payload.tool_call.name)
                         )
+                    yield payload
+                elif kind == "result":
+                    text_buffer, tool_calls, reasoning_text, \
+                        reasoning_details, finish_reason, _ = payload
+                elif kind == "error":
+                    logger.error("Provider streaming failed: %s", payload)
+                    yield ErrorEvent(
+                        error=f"Provider error: {payload}", recoverable=False,
                     )
-                elif chunk.type == "tool_call_complete":
-                    tool_calls.append(chunk.data)
-                elif chunk.type == "reasoning_delta":
-                    yield ReasoningDeltaEvent(fragment=chunk.data)
-                elif chunk.type == "reasoning":
-                    data = chunk.data or {}
-                    reasoning_text = data.get("text", "") or reasoning_text
-                    details = data.get("details")
-                    if details:
-                        reasoning_details = details
-                elif chunk.type == "done":
+                    await _fire("session_end", reason="provider_error")
+                    stream_failed = True
                     break
-        except Exception as e:
-            logger.error("Provider streaming error: %s", e)
-            yield ErrorEvent(error=f"Provider error: {e}", recoverable=False)
-            await _fire("session_end", reason="provider_error")
-            return
+            if stream_failed:
+                return
 
-        # 4. No tool calls → final answer
-        if not tool_calls:
-            final_msg: Message = Message(role="assistant", content=text_buffer)
+            # Inspect finish_reason. "length" means model hit max_tokens — surface
+            # a TruncatedEvent so the UI can warn the user instead of silently
+            # committing a partial answer as final.
+            if finish_reason == "length":
+                yield TruncatedEvent(content=text_buffer, finish_reason=finish_reason)
+
+            # 4. No tool calls → final answer
+            if not tool_calls:
+                final_msg: Message = Message(role="assistant", content=text_buffer)
+                if reasoning_text:
+                    final_msg["reasoning_text"] = reasoning_text
+                if reasoning_details:
+                    final_msg["reasoning_details"] = reasoning_details
+                conversation.append(final_msg)
+                # If in plan mode, buffer the response as plan content
+                if plan_mode.is_active and text_buffer.strip():
+                    plan_mode.append(text_buffer)
+                yield FinalAnswerEvent(content=text_buffer)
+                await _fire("session_end", reason="final_answer")
+                return
+
+            # 5. Tool calls → execute
+            assistant_msg = Message(
+                role="assistant",
+                content=text_buffer or None,
+                tool_calls=[
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            )
             if reasoning_text:
-                final_msg["reasoning_text"] = reasoning_text
+                assistant_msg["reasoning_text"] = reasoning_text
             if reasoning_details:
-                final_msg["reasoning_details"] = reasoning_details
-            conversation.append(final_msg)
-            # If in plan mode, buffer the response as plan content
-            if plan_mode.is_active and text_buffer.strip():
-                plan_mode.append(text_buffer)
-            yield FinalAnswerEvent(content=text_buffer)
-            await _fire("session_end", reason="final_answer")
-            return
+                assistant_msg["reasoning_details"] = reasoning_details
+            conversation.append(assistant_msg)
+            assistant_msg_appended = True
 
-        # 5. Tool calls → execute
-        assistant_msg = Message(
-            role="assistant",
-            content=text_buffer or None,
-            tool_calls=[
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                    },
+            # If the streaming dispatch already kicked off the tools, just
+            # collect them. Otherwise (e.g. provider that doesn't emit
+            # tool_call_complete until done), fall back to the batch path.
+            if pending_dispatched:
+                results = await executor.collect(pending_dispatched, tool_calls)
+            else:
+                results = await executor.execute_tool_calls(tool_calls, perm_cb)
+            for result in results:
+                yield ToolResultEvent(result=result)
+                conversation.append(result.to_message())
+        except (KeyboardInterrupt, asyncio.CancelledError) as exc:
+            interrupted = True
+            logger.warning("Agent loop interrupted: %s", type(exc).__name__)
+            # Tombstone repair: ensure the conversation stays protocol-valid.
+            #
+            # Case A — interruption during stream BEFORE the assistant
+            # message was appended: any tool_use ids the provider emitted
+            # are orphan because no assistant message holds them. Drop them
+            # — nothing to repair.
+            #
+            # Case B — interruption AFTER assistant message was appended
+            # (so tool_use blocks are now persisted) but BEFORE all
+            # tool_results came back. Append synthetic error tool_results
+            # for any ids without a matching result so the next turn can
+            # be sent to Anthropic without protocol error.
+            if assistant_msg_appended:
+                already_resulted = {
+                    m.get("tool_call_id")
+                    for m in conversation
+                    if m.get("role") == "tool"
                 }
-                for tc in tool_calls
-            ],
-        )
-        if reasoning_text:
-            assistant_msg["reasoning_text"] = reasoning_text
-        if reasoning_details:
-            assistant_msg["reasoning_details"] = reasoning_details
-        conversation.append(assistant_msg)
-
-        results = await executor.execute_tool_calls(tool_calls, perm_cb)
-        for result in results:
-            yield ToolResultEvent(result=result)
-            conversation.append(result.to_message())
+                for tc in tool_calls:
+                    if tc.id not in already_resulted:
+                        conversation.append({
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "name": tc.name,
+                            "content": "[interrupted by user before tool completed]",
+                        })  # type: ignore[arg-type]
+            # If reasoning_details was captured mid-stream but the assistant
+            # message never landed (Case A), the data simply goes out of
+            # scope — Anthropic's extended-thinking protocol forbids
+            # re-sending a half-thought without its completion.
+            yield ErrorEvent(
+                error=f"Interrupted by user ({type(exc).__name__})",
+                recoverable=True,
+            )
+            await _fire("session_end", reason="interrupted")
+            # Re-raise so the outer caller (CLI / tests) sees the cancellation
+            # and can decide what to do next.
+            raise
+        finally:
+            if interrupted:
+                # Belt-and-suspenders: if anything went sideways above, ensure
+                # we don't leave the conversation half-extended.
+                pass
 
         # 6. Budget + warning
         try:

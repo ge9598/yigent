@@ -24,18 +24,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _VALID_STRATEGIES = frozenset({"direct", "plan_then_execute"})
+_VALID_CAPABILITIES = frozenset({"search", "coding", "interpreter", "file_ops"})
 
 _CLASSIFIER_PROMPT = """You are a task complexity classifier.
 
-Given the user's message, pick one strategy:
-  - "direct": simple, single-capability task (one edit, one file, one
-    command). The agent can start executing immediately.
-  - "plan_then_execute": multi-step, multi-file, or architecturally
-    ambiguous task that benefits from an explicit plan phase before any
-    write or execute operations.
+Given the user's message, output two things:
+  1. strategy — pick one:
+     - "direct": simple, single-capability task (one edit, one file, one
+       command). The agent can start executing immediately.
+     - "plan_then_execute": multi-step, multi-file, or architecturally
+       ambiguous task that benefits from an explicit plan phase before any
+       write or execute operations.
+  2. capabilities — pick zero or more from:
+     - "search": needs web/code search to gather information
+     - "coding": writes or edits source code
+     - "interpreter": runs code (Python REPL, shell, etc.)
+     - "file_ops": reads/writes files in the workspace
 
 Respond with ONLY a JSON object and nothing else:
-{"strategy": "direct"|"plan_then_execute", "reason": "<one short sentence>"}
+{"strategy": "direct"|"plan_then_execute",
+ "capabilities": ["search"|"coding"|"interpreter"|"file_ops", ...],
+ "reason": "<one short sentence>"}
 
 No preamble, no code fences, no explanations outside the JSON."""
 
@@ -44,6 +53,14 @@ No preamble, no code fences, no explanations outside the JSON."""
 class RoutingDecision:
     strategy: str                # "direct" | "plan_then_execute"
     reason: str = ""
+    # Unit 10 — predicted capabilities. Empty list = no specific prediction.
+    # Subset of {search, coding, interpreter, file_ops}. Used to pre-load
+    # the obvious tools so the model doesn't pay a ToolSearch round-trip.
+    capabilities: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.capabilities is None:
+            self.capabilities = []
 
 
 class CapabilityRouter:
@@ -82,12 +99,19 @@ class CapabilityRouter:
 
         strategy = parsed.get("strategy") if isinstance(parsed, dict) else None
         reason = parsed.get("reason", "") if isinstance(parsed, dict) else ""
+        raw_caps = parsed.get("capabilities", []) if isinstance(parsed, dict) else []
+        if not isinstance(raw_caps, list):
+            raw_caps = []
+        capabilities = [c for c in raw_caps if c in _VALID_CAPABILITIES]
         if strategy not in _VALID_STRATEGIES:
             return RoutingDecision(
                 strategy="direct",
                 reason=f"default: unknown strategy {strategy!r}",
+                capabilities=capabilities,
             )
-        return RoutingDecision(strategy=strategy, reason=reason or "")
+        return RoutingDecision(
+            strategy=strategy, reason=reason or "", capabilities=capabilities,
+        )
 
 
 def _strip_fences(text: str) -> str:

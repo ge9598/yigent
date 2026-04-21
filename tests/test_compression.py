@@ -59,26 +59,29 @@ async def test_layer1_leaves_short_tool_results_alone() -> None:
 
 @pytest.mark.asyncio
 async def test_layer2_dedups_identical_reads() -> None:
+    """Unit 9 — dedup is now content-hash based and skips short content.
+    Use a content longer than the 64-byte minimum so dedup actually fires."""
     engine = CompressionEngine()
+    long_body = "FILE BODY " * 20  # 200 bytes
     msgs = [
         {"role": "assistant", "content": None,
          "tool_calls": [{"id": "1", "type": "function",
                          "function": {"name": "read_file",
                                       "arguments": '{"path": "foo"}'}}]},
         {"role": "tool", "tool_call_id": "1", "name": "read_file",
-         "content": "FILE BODY"},
+         "content": long_body},
         {"role": "assistant", "content": None,
          "tool_calls": [{"id": "2", "type": "function",
                          "function": {"name": "read_file",
                                       "arguments": '{"path": "foo"}'}}]},
         {"role": "tool", "tool_call_id": "2", "name": "read_file",
-         "content": "FILE BODY"},
+         "content": long_body},
     ]
     out = engine._layer2_dedup_file_reads(msgs)
     # The earlier one should become a stub; the latest stays.
     tool_msgs = [m for m in out if m.get("role") == "tool"]
     assert tool_msgs[0]["content"] == "[duplicate file read elided]"
-    assert tool_msgs[1]["content"] == "FILE BODY"
+    assert tool_msgs[1]["content"] == long_body
 
 
 @pytest.mark.asyncio
@@ -255,3 +258,112 @@ async def test_compression_hooks_skip_when_no_compression_needed() -> None:
     msgs = [{"role": "user", "content": "short"}]
     await engine.compress(msgs, target_tokens=10_000)
     assert pre_events == []  # no hook fires when target already satisfied
+
+
+# ---------------------------------------------------------------------------
+# Unit 9 — structured summary template + compression_cursor + L2 widening
+# ---------------------------------------------------------------------------
+
+def test_summary_template_has_required_sections():
+    """The Hermes-style template must enforce the canonical section order."""
+    from src.context.summary_template import SUMMARY_SYSTEM_PROMPT
+    for section in (
+        "# Goal",
+        "# Constraints",
+        "# Progress",
+        "# Key Decisions",
+        "# Relevant Files",
+        "# Next Steps",
+        "# Critical Context",
+    ):
+        assert section in SUMMARY_SYSTEM_PROMPT
+
+
+def test_summary_user_prompt_renders_transcript():
+    from src.context.summary_template import render_user_prompt
+    out = render_user_prompt("transcript here")
+    assert "transcript here" in out
+    assert "Summarize" in out
+
+
+def test_compression_cursor_starts_at_zero():
+    engine = CompressionEngine()
+    assert engine.compression_cursor == 0
+
+
+@pytest.mark.asyncio
+async def test_compression_cursor_advances_after_layer3_summarize() -> None:
+    """After layer-3 summarizes some head turns, the cursor must move so
+    later compress() calls don't re-summarize them."""
+    class _FakeProvider:
+        async def stream_message(self, **kwargs):
+            for w in "summary text here".split():
+                yield type("C", (), {"type": "token", "data": w + " "})()
+            yield type("C", (), {"type": "done", "data": "stop"})()
+
+    engine = CompressionEngine(auxiliary_provider=_FakeProvider())
+    msgs = [{"role": "user", "content": f"turn {i} " * 50} for i in range(12)]
+    assert engine.compression_cursor == 0
+    await engine.compress(msgs, target_tokens=200)
+    # After at least one layer-3 run, cursor advanced past the summary.
+    assert engine.compression_cursor > 0
+
+
+def test_l2_dedup_widens_to_search_files() -> None:
+    """search_files results that repeat must dedup, same as read_file."""
+    engine = CompressionEngine()
+    long_body = "match line " * 30
+    msgs = [
+        {"role": "tool", "tool_call_id": "1", "name": "search_files",
+         "content": long_body},
+        {"role": "tool", "tool_call_id": "2", "name": "search_files",
+         "content": long_body},
+    ]
+    out = engine._layer2_dedup_file_reads(msgs)
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    assert tool_msgs[0]["content"] == "[duplicate file read elided]"
+    assert tool_msgs[1]["content"] == long_body
+
+
+def test_l2_dedup_widens_to_mcp_read_tools() -> None:
+    """MCP tools named server__read_* / server__get_* / server__fetch_* dedup."""
+    engine = CompressionEngine()
+    long_body = "remote content here " * 20
+    msgs = [
+        {"role": "tool", "tool_call_id": "1", "name": "github__get_pr",
+         "content": long_body},
+        {"role": "tool", "tool_call_id": "2", "name": "github__get_pr",
+         "content": long_body},
+    ]
+    out = engine._layer2_dedup_file_reads(msgs)
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    assert tool_msgs[0]["content"] == "[duplicate file read elided]"
+    assert tool_msgs[1]["content"] == long_body
+
+
+def test_l2_dedup_skips_short_content() -> None:
+    """Content under 64 bytes is too small to bother deduping."""
+    engine = CompressionEngine()
+    msgs = [
+        {"role": "tool", "tool_call_id": "1", "name": "read_file", "content": "small"},
+        {"role": "tool", "tool_call_id": "2", "name": "read_file", "content": "small"},
+    ]
+    out = engine._layer2_dedup_file_reads(msgs)
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    # Both stay — neither becomes a stub.
+    assert tool_msgs[0]["content"] == "small"
+    assert tool_msgs[1]["content"] == "small"
+
+
+def test_l2_dedup_does_not_widen_to_unrelated_tools() -> None:
+    """write_file and bash should NOT trigger dedup even with identical content."""
+    engine = CompressionEngine()
+    long_body = "x" * 200
+    msgs = [
+        {"role": "tool", "tool_call_id": "1", "name": "write_file", "content": long_body},
+        {"role": "tool", "tool_call_id": "2", "name": "write_file", "content": long_body},
+    ]
+    out = engine._layer2_dedup_file_reads(msgs)
+    tool_msgs = [m for m in out if m.get("role") == "tool"]
+    assert tool_msgs[0]["content"] == long_body
+    assert tool_msgs[1]["content"] == long_body

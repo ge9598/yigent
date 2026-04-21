@@ -102,3 +102,89 @@ class TestPlanModeApproval:
         pm.exit()
         pm.enter("s2")
         assert not pm.is_approved  # fresh session
+
+
+class TestPlanModeDynamicAllowlist:
+    """Unit 10 — plan-mode allowlist computed from registry's READ_ONLY tools."""
+
+    def _make_registry(self):
+        from src.core.types import (
+            PermissionLevel, ToolDefinition, ToolSchema,
+        )
+        from src.tools.registry import ToolRegistry
+
+        reg = ToolRegistry()
+
+        async def noop(**kw):
+            return ""
+
+        for name, level in [
+            ("custom_read", PermissionLevel.READ_ONLY),
+            ("github__get_pr", PermissionLevel.READ_ONLY),  # MCP-style
+            ("write_file", PermissionLevel.WRITE),
+            ("rm", PermissionLevel.DESTRUCTIVE),
+            ("exit_plan_mode", PermissionLevel.WRITE),
+        ]:
+            reg.register(ToolDefinition(
+                name=name, description=name, handler=noop,
+                schema=ToolSchema(
+                    name=name, description=name,
+                    parameters={"type": "object", "properties": {}},
+                    permission_level=level,
+                ),
+            ))
+        return reg
+
+    def test_dynamic_allowlist_includes_read_only_tools(self):
+        """Every READ_ONLY tool from the registry should be in the allowlist."""
+        pm = PlanMode()
+        pm.set_registry(self._make_registry())
+        pm.enter("s1")
+        # Built-in READ_ONLY:
+        assert pm.is_tool_allowed("custom_read")
+        # MCP READ_ONLY automatically flows through (this was the gap):
+        assert pm.is_tool_allowed("github__get_pr")
+        # exit_plan_mode is special-allowed even though it's WRITE:
+        assert pm.is_tool_allowed("exit_plan_mode")
+
+    def test_dynamic_allowlist_excludes_write_and_destructive(self):
+        pm = PlanMode()
+        pm.set_registry(self._make_registry())
+        pm.enter("s1")
+        assert not pm.is_tool_allowed("write_file")
+        assert not pm.is_tool_allowed("rm")
+
+    def test_unbound_registry_falls_back_to_static_allowlist(self):
+        """Without set_registry(), uses the hardcoded ALLOWED_TOOLS for back-compat."""
+        pm = PlanMode()
+        pm.enter("s1")
+        # Static fallback set should still contain the canonical names:
+        assert pm.is_tool_allowed("read_file")
+        assert pm.is_tool_allowed("exit_plan_mode")
+        assert not pm.is_tool_allowed("write_file")
+
+    def test_re_enter_recomputes_allowlist(self):
+        """Adding a tool between enter() calls should be picked up next enter()."""
+        from src.core.types import (
+            PermissionLevel, ToolDefinition, ToolSchema,
+        )
+        reg = self._make_registry()
+        pm = PlanMode()
+        pm.set_registry(reg)
+        pm.enter("s1")
+        assert not pm.is_tool_allowed("late_added_tool")
+        pm.exit()
+        # Register a new READ_ONLY tool, then re-enter.
+        async def noop(**kw):
+            return ""
+
+        reg.register(ToolDefinition(
+            name="late_added_tool", description="x", handler=noop,
+            schema=ToolSchema(
+                name="late_added_tool", description="x",
+                parameters={"type": "object", "properties": {}},
+                permission_level=PermissionLevel.READ_ONLY,
+            ),
+        ))
+        pm.enter("s2")
+        assert pm.is_tool_allowed("late_added_tool")

@@ -106,13 +106,23 @@ async def test_spawn_fork_shares_conversation_and_budget():
     child = await coord.spawn_fork(budget_share=10)
     assert isinstance(child, SpawnedAgent)
     assert child.mode == "fork"
-    # Fork shares the conversation list by reference (mutation visible to parent)
-    assert child.conversation is parent_conv
+    # Unit 8 — Fork has an ISOLATED conversation (deep copy), NOT a reference.
+    # Mutating the child's conversation must not affect the parent. Cache is
+    # still shared (same prefix_hash) so warm cache is reused.
+    assert child.conversation == parent_conv
+    assert child.conversation is not parent_conv
+    child.conversation.append({"role": "user", "content": "child-only"})
+    assert len(parent_conv) == 1, "Fork mutation leaked into parent"
     # Fork's cache has same prefix_hash as parent
     assert child.cache.prefix_hash == parent_cache.prefix_hash
-    # Budget: parent decremented upfront
-    assert parent_budget.remaining == 40
-    assert child.budget.total == 10
+    # Unit 10 — budget is now truly shared. allocate() returns a child handle
+    # with a local cap (10) but does NOT pre-deduct from the parent.
+    assert parent_budget.remaining == 50  # unchanged
+    assert child.budget.total == 10  # local cap
+    # output_file defaults to trajectories/fork_*.md
+    assert child.output_file is not None
+    assert child.output_file.parent.name == "trajectories"
+    assert child.output_file.name.startswith("fork_")
 
 
 @pytest.mark.asyncio
@@ -141,8 +151,8 @@ async def test_spawn_subagent_has_fresh_context():
     assert child.conversation == []
     # Subagent's cache has a different prefix_hash
     assert child.cache.prefix_hash != parent_cache.prefix_hash
-    # Budget decremented
-    assert parent_budget.remaining == 35
+    # Unit 10 — shared budget; allocate() doesn't pre-deduct.
+    assert parent_budget.remaining == 50  # unchanged until either side spends
 
 
 @pytest.mark.asyncio
@@ -207,3 +217,84 @@ async def test_task_tools_permission_level():
     assert tools["claim_task"].schema.permission_level == PermissionLevel.WRITE
     assert tools["complete_task"].schema.permission_level == PermissionLevel.WRITE
     assert tools["task_status"].schema.permission_level == PermissionLevel.READ_ONLY
+
+
+# ---------------------------------------------------------------------------
+# Unit 8 — Fork output_file + main_handle + write_result
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_fork_output_file_explicit(tmp_path):
+    from src.context.prompt_cache import PromptCache
+    from src.core.iteration_budget import IterationBudget
+    parent_cache = PromptCache(frozen_system=[{"role": "system", "content": "p"}])
+    parent_budget = IterationBudget(total=50, enable_warning=False)
+    coord = MultiAgentCoordinator(
+        parent_budget=parent_budget,
+        parent_conversation=[],
+        parent_cache=parent_cache,
+        trajectories_dir=tmp_path,
+    )
+    out = tmp_path / "my_fork.md"
+    child = await coord.spawn_fork(budget_share=5, output_file=out)
+    assert child.output_file == out
+
+    child.write_result("# Final answer\n\nDid the thing.")
+    assert out.exists()
+    assert "Did the thing" in out.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_fork_output_file_default_in_trajectories_dir(tmp_path):
+    from src.context.prompt_cache import PromptCache
+    from src.core.iteration_budget import IterationBudget
+    parent_cache = PromptCache(frozen_system=[{"role": "system", "content": "p"}])
+    parent_budget = IterationBudget(total=50, enable_warning=False)
+    coord = MultiAgentCoordinator(
+        parent_budget=parent_budget,
+        parent_conversation=[],
+        parent_cache=parent_cache,
+        trajectories_dir=tmp_path,
+    )
+    child = await coord.spawn_fork(budget_share=5)
+    assert child.output_file is not None
+    assert child.output_file.parent == tmp_path
+    assert child.output_file.name.startswith("fork_")
+    assert child.output_file.suffix == ".md"
+
+    child.write_result("hello")
+    assert child.output_file.exists()
+
+
+def test_main_handle_returns_main_mode():
+    from src.context.prompt_cache import PromptCache
+    from src.core.iteration_budget import IterationBudget
+    parent_cache = PromptCache(frozen_system=[{"role": "system", "content": "p"}])
+    parent_budget = IterationBudget(total=50, enable_warning=False)
+    parent_conv = [{"role": "user", "content": "hi"}]
+    coord = MultiAgentCoordinator(
+        parent_budget=parent_budget,
+        parent_conversation=parent_conv,
+        parent_cache=parent_cache,
+    )
+    handle = coord.main_handle()
+    assert handle.mode == "main"
+    # main wraps the LIVE conversation, not a copy.
+    assert handle.conversation is parent_conv
+    assert handle.cache is parent_cache
+    assert handle.output_file is None
+
+
+def test_write_result_noop_when_no_output_file():
+    """Subagent / main have no output_file — write_result is silent no-op."""
+    from src.context.prompt_cache import PromptCache
+    from src.core.iteration_budget import IterationBudget
+    parent_cache = PromptCache(frozen_system=[{"role": "system", "content": "p"}])
+    parent_budget = IterationBudget(total=50, enable_warning=False)
+    coord = MultiAgentCoordinator(
+        parent_budget=parent_budget,
+        parent_conversation=[],
+        parent_cache=parent_cache,
+    )
+    handle = coord.main_handle()
+    handle.write_result("anything")  # must not raise

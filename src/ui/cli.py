@@ -113,6 +113,29 @@ async def _run_conversation(config, provider, registry, budget, plan_mode,
                 plan_mode.enter(session_id)
                 console.print("[yellow]Plan mode activated.[/]")
 
+        async def cmd_approve(self, args: str) -> None:
+            """Approve the current plan and let the agent proceed.
+
+            Plan mode stays active until the model itself calls
+            exit_plan_mode — the approval just unlocks the next step.
+            """
+            if not plan_mode.is_active:
+                console.print("[yellow]No plan to approve — not in plan mode.[/]")
+                return
+            msg = await plan_mode.approve()
+            console.print(f"[green]{msg}[/]")
+
+        async def cmd_reject(self, args: str) -> None:
+            """Reject the current plan with an optional reason: /reject <reason>
+
+            Plan mode stays active so the model can revise.
+            """
+            if not plan_mode.is_active:
+                console.print("[yellow]No plan to reject — not in plan mode.[/]")
+                return
+            msg = await plan_mode.reject(note=args.strip())
+            console.print(f"[yellow]{msg}[/]")
+
         def cmd_remember(self, args: str) -> None:
             """Save a fact to long-term memory: /remember TOPIC: CONTENT"""
             if memory_store is None:
@@ -331,6 +354,7 @@ async def async_main() -> None:
     registry = get_registry()
     budget = IterationBudget(config.agent.max_iterations)
     plan_mode = PlanMode(save_dir=config.plan_mode.save_dir)
+    plan_mode.set_registry(registry)
     env_injector = EnvironmentInjector()
 
     # Phase 2b Unit 5: shared TaskBoard exposed as task tools. The board is
@@ -355,6 +379,10 @@ async def async_main() -> None:
         logger.warning("Memory store init failed: %s", exc)
         memory_store = None  # degrade gracefully
 
+    # Resolve auxiliary provider early — both the YOLO shadow classifier
+    # (Unit 10) and the compression engine reuse it.
+    aux_provider = resolve_auxiliary(config)
+
     # Phase 2 Unit 2: hook system (loaded from config) + permission gate.
     # Both are optional in the constructors so other tests/setups still work.
     hooks = load_hooks_from_config(config.hooks or {})
@@ -362,14 +390,9 @@ async def async_main() -> None:
     permission_gate = PermissionGate(
         registry=registry, ctx=ctx, hooks=hooks,
         yolo_mode=config.permissions.yolo_mode,
+        aux_provider=aux_provider,
     )
     executor = StreamingExecutor(registry, ctx, permission_gate=permission_gate)
-
-    # Phase 2 Unit 1: assemble context with the 5-zone assembler + 5-layer
-    # compression. Aux provider is optional; if missing, layers 3-4 short-circuit
-    # via the breaker. Memory store is injected so Zone 3 can surface the
-    # MEMORY.md index to the model automatically.
-    aux_provider = resolve_auxiliary(config)
     compression = CompressionEngine(auxiliary_provider=aux_provider, hook_system=hooks)
     assembler = ContextAssembler(
         system_prompt=_SYSTEM_PROMPT,
@@ -378,6 +401,7 @@ async def async_main() -> None:
         memory_store=memory_store,
         output_reserve=config.context.output_reserve,
         safety_buffer=config.context.buffer,
+        hook_system=hooks,
     )
 
     # Phase 2b Unit 4: capability router. Reuses the same auxiliary LLM as

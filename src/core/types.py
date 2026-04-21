@@ -34,6 +34,20 @@ class PermissionDecision(str, Enum):
     BLOCK = "block"
 
 
+class FatalToolError(Exception):
+    """Raised by a tool handler or the permission subsystem when an error is
+    so severe that pending sibling tool calls in the same turn must be
+    cancelled (not allowed to finish). Examples:
+
+    - permission gate's own validation chain panics (not a normal deny)
+    - tool handler hits OOM / catastrophic state corruption
+
+    Normal tool failures (timeout, business-logic exception, permission
+    BLOCK) do NOT raise this — they return error ToolResult and let
+    siblings finish. Only true "the world is broken" errors should propagate.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Messages — TypedDict to stay dict-compatible with OpenAI chat format
 # ---------------------------------------------------------------------------
@@ -194,6 +208,31 @@ class ErrorEvent:
     recoverable: bool = False
 
 
+@dataclass
+class TruncatedEvent:
+    """Yielded when the model stopped because it hit max_tokens.
+
+    Distinct from a normal final answer: the assistant text is incomplete and
+    the harness must NOT silently commit it as the final response. Today the
+    UI surfaces this to the user; a future iteration could automatically issue
+    a continuation prompt. ``content`` carries whatever partial text we got.
+    """
+    content: str
+    finish_reason: str = "length"
+
+
+@dataclass
+class ProviderFallbackEvent:
+    """Yielded when the agent loop falls back from primary to fallback provider.
+
+    Surfaced so the UI can warn the user that the active model changed mid-task,
+    and so logs/telemetry can attribute subsequent tokens to the fallback.
+    """
+    primary: str
+    fallback: str
+    reason: str
+
+
 Event = (
     TurnStartedEvent
     | TokenEvent
@@ -205,6 +244,8 @@ Event = (
     | BudgetExhaustedEvent
     | PlanModeTriggeredEvent
     | ErrorEvent
+    | TruncatedEvent
+    | ProviderFallbackEvent
 )
 
 
@@ -219,6 +260,10 @@ class ToolSchema(BaseModel):
     permission_level: PermissionLevel = PermissionLevel.READ_ONLY
     timeout: int = 30
     deferred: bool = False
+    # Mark tools that touch shared serial resources (stdin, terminal, UI prompt)
+    # so the streaming executor doesn't run them concurrently with siblings.
+    # Examples: ask_user (blocks for user input), exit_plan_mode (UI confirm).
+    exclusive: bool = False
 
     def to_openai_tool(self) -> dict[str, Any]:
         """Convert to the OpenAI tools parameter format."""
