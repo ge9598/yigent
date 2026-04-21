@@ -257,16 +257,14 @@ async def _run_conversation(config, provider, registry, budget, plan_mode,
                         thinking.start()
                     continue
                 if isinstance(event, ReasoningDeltaEvent):
-                    # Reasoning started → refine the spinner label. If no
-                    # spinner is running (turn event was missed somehow),
-                    # start one here.
-                    if thinking is None and not text_streamed:
+                    # Reasoning started → refine the spinner label.
+                    if thinking is not None:
+                        thinking.update("[dim italic]Thinking...[/]")
+                    elif not text_streamed:
                         thinking = console.status(
                             "[dim italic]Thinking...[/]", spinner="dots",
                         )
                         thinking.start()
-                    else:
-                        thinking.update("[dim italic]Thinking...[/]")  # type: ignore[union-attr]
                     continue
                 if isinstance(event, TokenEvent):
                     _stop_thinking()
@@ -294,9 +292,7 @@ async def _run_conversation(config, provider, registry, budget, plan_mode,
                     return
                 elif isinstance(event, PlanModeTriggeredEvent):
                     _stop_thinking()
-                    console.print(
-                        f"[bold yellow]Plan mode triggered:[/bold yellow] {event.reason}",
-                    )
+                    console.print(f"[dim](plan mode: {event.reason})[/]")
                 elif isinstance(event, ErrorEvent):
                     _stop_thinking()
                     style = "yellow" if event.recoverable else "red"

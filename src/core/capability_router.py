@@ -41,6 +41,13 @@ Given the user's message, output two things:
      - "interpreter": runs code (Python REPL, shell, etc.)
      - "file_ops": reads/writes files in the workspace
 
+Default to "direct" when the request is a short instruction (≤ 10 words)
+that maps to one obvious tool call, even if the exact parameters are
+ambiguous. Examples of "direct": "list memory", "list files", "show git
+status", "read config.yaml", "what tools do you have". Only pick
+"plan_then_execute" when the request clearly requires multiple writes,
+multiple files, or design decisions.
+
 Respond with ONLY a JSON object and nothing else:
 {"strategy": "direct"|"plan_then_execute",
  "capabilities": ["search"|"coding"|"interpreter"|"file_ops", ...],
