@@ -17,8 +17,9 @@ benchmarks/
 benchmark_runs/
 test_workspace/
 
-# Comparison reports — internal analysis, not published
+# Comparison reports + internal audits — internal analysis, not published
 docs/*COMPARISON*.md
+docs/*AUDIT*.md
 skills/*.md
 !skills/.gitkeep
 
