@@ -14,6 +14,7 @@ data/
 plans/
 trajectories/
 benchmarks/
+benchmark_runs/
 skills/*.md
 !skills/.gitkeep
 
