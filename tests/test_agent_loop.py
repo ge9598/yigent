@@ -318,8 +318,18 @@ async def test_cancelled_during_executor_appends_tool_result_tombstones():
             pass
 
     task = asyncio.create_task(_drive())
-    # Let it begin executing the slow tool, then cancel.
-    await asyncio.sleep(0.1)
+    # Wait until the assistant message with tool_calls has been appended —
+    # that's the signal that the loop has entered the executor phase and
+    # we're inside Case B (tombstone-repair territory). Poll instead of a
+    # fixed sleep so the test isn't flaky under CI load.
+    for _ in range(200):  # up to 2s
+        await asyncio.sleep(0.01)
+        has_tool_use = any(
+            msg.get("role") == "assistant" and msg.get("tool_calls")
+            for msg in conversation
+        )
+        if has_tool_use:
+            break
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task

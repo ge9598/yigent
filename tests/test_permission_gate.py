@@ -483,3 +483,115 @@ async def test_yolo_classifier_caches_decisions(tmp_path) -> None:
             _always_allow,
         )
     assert call_count["n"] == 1, "aux LLM should be called only once for identical args"
+
+
+# ---------------------------------------------------------------------------
+# YOLO classifier circuit breaker — skip aux-LLM when upstream is sticky-down
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_yolo_breaker_trips_after_threshold_failures(tmp_path) -> None:
+    """After N consecutive aux-LLM failures, the breaker opens and
+    subsequent calls skip the aux roundtrip entirely (regex still runs)."""
+    reg = _make_registry(_def("bash", PermissionLevel.EXECUTE))
+    call_count = {"n": 0}
+
+    class _BrokenAux:
+        async def stream_message(self, **kwargs):
+            call_count["n"] += 1
+            raise RuntimeError("529 overloaded")
+            yield  # make generator
+
+    gate = PermissionGate(
+        reg, _ctx(tmp_path), yolo_mode=True,
+        aux_provider=_BrokenAux(), yolo_breaker_threshold=3,
+    )
+
+    # Use distinct args so cache misses on every call — otherwise the
+    # cache would short-circuit before aux.
+    for i in range(3):
+        await gate.check(
+            ToolCall(id=str(i), name="bash",
+                     arguments={"command": f"cmd_{i}"}),
+            _always_allow,
+        )
+    assert call_count["n"] == 3, "first 3 calls should hit aux"
+
+    # Next calls must NOT hit the aux provider at all
+    for i in range(3, 6):
+        await gate.check(
+            ToolCall(id=str(i), name="bash",
+                     arguments={"command": f"cmd_{i}"}),
+            _always_allow,
+        )
+    assert call_count["n"] == 3, "breaker should short-circuit aux after 3 failures"
+
+
+@pytest.mark.asyncio
+async def test_yolo_breaker_resets_on_success(tmp_path) -> None:
+    """Transient failures below threshold shouldn't trip the breaker —
+    a single success resets the counter."""
+    reg = _make_registry(_def("bash", PermissionLevel.EXECUTE))
+    call_seq = iter([
+        "fail", "fail",   # two failures
+        "safe",           # then a success
+        "fail", "fail",   # two more — still below threshold thanks to reset
+    ])
+
+    class _FlakyAux:
+        async def stream_message(self, **kwargs):
+            from src.core.types import StreamChunk
+            nxt = next(call_seq)
+            if nxt == "fail":
+                raise RuntimeError("flaky")
+                yield  # pragma: no cover
+            yield StreamChunk(type="token", data=nxt)
+            yield StreamChunk(type="done", data="stop")
+
+    gate = PermissionGate(
+        reg, _ctx(tmp_path), yolo_mode=True,
+        aux_provider=_FlakyAux(), yolo_breaker_threshold=3,
+    )
+
+    # fail, fail, success, fail, fail — 5 attempts, breaker stays closed
+    for i in range(5):
+        await gate.check(
+            ToolCall(id=str(i), name="bash",
+                     arguments={"command": f"cmd_{i}"}),
+            _always_allow,
+        )
+    assert gate._yolo_breaker.is_open is False
+    assert gate._yolo_breaker.failures == 2  # two since last success
+
+
+@pytest.mark.asyncio
+async def test_yolo_breaker_open_still_runs_regex(tmp_path) -> None:
+    """Even with the breaker tripped, dangerous regex patterns must still
+    be caught — the breaker only skips the aux-LLM step, not the
+    pre-filter."""
+    reg = _make_registry(_def("bash", PermissionLevel.EXECUTE))
+
+    class _BrokenAux:
+        async def stream_message(self, **kwargs):
+            raise RuntimeError("down")
+            yield  # pragma: no cover
+
+    gate = PermissionGate(
+        reg, _ctx(tmp_path), yolo_mode=True,
+        aux_provider=_BrokenAux(), yolo_breaker_threshold=1,
+    )
+
+    # Trip the breaker with a safe command
+    await gate.check(
+        ToolCall(id="warmup", name="bash", arguments={"command": "ls"}),
+        _always_allow,
+    )
+    assert gate._yolo_breaker.is_open
+
+    # Now try an obviously-dangerous command — regex must still catch it
+    decision = await gate.check(
+        ToolCall(id="bad", name="bash", arguments={"command": "rm -rf /"}),
+        _always_allow,
+    )
+    assert decision == PermissionDecision.BLOCK

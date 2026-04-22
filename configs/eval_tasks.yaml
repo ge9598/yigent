@@ -1,77 +1,192 @@
 # Eval Benchmark Task Definitions
-# 4 domains × 3 difficulty levels
+# 4 domains × 3 difficulty levels = 12 tasks.
+#
+# Each task prompt assumes the agent is running in a fresh working directory
+# that the benchmark harness seeds with any required fixtures (CSV files,
+# logs, buggy scripts, etc). Prompts MUST tell the agent:
+#   - what files exist in the working directory (so it doesn't reask)
+#   - which tools are expected (write_file / python_repl / web_search / …)
+#   - what "done" looks like (pass criterion mirrors the rule check)
+#
+# Prompts written as imperative, self-contained, no external dependencies.
 
 coding:
-  - task: "Write a Python function that implements quicksort and include 3 test cases."
+  - task: |
+      Write a Python function implementing quicksort, together with three test
+      cases that cover: an empty list, an already-sorted list, and a
+      reverse-sorted list. Use the python_repl tool to actually run the tests
+      and confirm they all pass. The task is not complete until you have
+      observed the tests passing in the repl output.
     check: code_executes
     difficulty: easy
     timeout: 120
 
-  - task: "Read the file src/core/agent_loop.py and refactor it to extract the tool execution logic into a separate method."
-    check: refactor_quality
-    difficulty: medium
-    timeout: 180
-
-  - task: "The following Python script raises an IndexError on line 15. Debug and fix it: [provide test script]"
+  - task: |
+      The file buggy.py in the current working directory defines a function
+      pick_third(items) that crashes with IndexError when the input list has
+      fewer than 3 elements (line 15: `return items[2]`). Do the following:
+      1. Use read_file to read buggy.py.
+      2. Use python_repl to reproduce the crash on the given input [1, 2].
+      3. Use write_file to replace buggy.py with a version where pick_third
+         returns None (or raises a clear ValueError) when len(items) < 3.
+      4. Use python_repl again to confirm the new version runs without
+         crashing on the same input.
+      You must observe both the crash reproduction AND the clean run. The
+      task is not complete until both have happened.
     check: bug_fixed
     difficulty: hard
     timeout: 240
+    setup: "create a buggy.py with an IndexError on line 15"
+
+  - task: |
+      The file buggy.py in the current working directory has a single function
+      called process(items) that sums a list, plus a main block. Your task:
+      use read_file to read it, then use write_file to save a refactored
+      version where the sum logic is pulled out of process() into a new
+      helper called _sum_items(items). process() must call _sum_items. The
+      public behaviour must not change. You MUST use both read_file and
+      write_file for this task.
+    check: refactor_quality
+    difficulty: medium
+    timeout: 180
+    setup: "create a buggy.py to refactor"
 
 research:
-  - task: "Summarize the three main RAG architectures (Naive, Advanced, Modular) and their trade-offs in a structured format."
-    check: content_quality
+  - task: |
+      Name the three most-used Python HTTP client libraries (requests,
+      httpx, urllib3) and list ONE distinguishing feature for each. Answer
+      in your own words — no tools required, no files to write. Your
+      final answer MUST mention each of the three library names by name
+      (not just one of them).
+    check: content_http_libs
+    difficulty: easy
+    timeout: 90
+
+  - task: |
+      Summarise the three main RAG (retrieval-augmented generation)
+      architectures — Naive RAG, Advanced RAG, Modular RAG — and describe
+      their trade-offs in a structured markdown format (headings or a
+      table). Answer from your own knowledge; no tools required. Your
+      final answer MUST explicitly name all three — Naive, Advanced, and
+      Modular — and describe each briefly. A truncated answer that covers
+      only one architecture will fail the check.
+    check: content_rag_architectures
     difficulty: medium
     timeout: 120
 
-  - task: "Compare vLLM and SGLang in terms of throughput, latency, memory efficiency, and supported features. Include specific numbers where possible."
-    check: comparison_completeness
+  - task: |
+      Compare vLLM and SGLang along four dimensions: throughput, latency,
+      memory efficiency, and supported features. Produce a markdown table
+      (pipe `|` syntax) with one row per dimension. Include specific
+      numbers where confident; state uncertainty otherwise. Answer from
+      your own knowledge. Your answer MUST mention both system names
+      (vLLM, SGLang) AND all four dimensions — truncation on any row
+      will fail the check.
+    check: comparison_vllm_sglang
     difficulty: hard
     timeout: 180
 
 data_analysis:
-  - task: "Analyze the distribution of the provided CSV file. Report mean, median, std for each numeric column and generate a summary."
+  - task: |
+      The file data.csv in the current working directory has 5 numeric
+      columns and 100 rows. Use python_repl to compute the mean, median,
+      and standard deviation for each numeric column, then produce a final
+      written summary that explicitly mentions "mean", "median", and "std"
+      (or "standard deviation") for at least one column. The task is not
+      complete until your final answer reports those three statistics.
     check: has_statistics
     difficulty: easy
     timeout: 120
     setup: "create a sample CSV with 5 columns and 100 rows"
 
-  - task: "Find anomalies in the provided dataset. An anomaly is any value more than 3 standard deviations from the column mean. List them and suggest possible causes."
+  - task: |
+      The file data.csv in the current working directory has two columns:
+      `category` (3 distinct values) and `value` (integers). Use python_repl
+      to group the rows by `category` and report the count and mean of
+      `value` for each group. Your final answer must describe the groupby
+      operation (the word "groupby" or "group by" must appear) and report
+      the per-group counts.
+    check: has_groupby
+    difficulty: medium
+    timeout: 150
+    setup: "create a sample CSV with category and value columns, 3 categories, 60 rows"
+
+  - task: |
+      The file data.csv in the current working directory has numeric columns
+      with a small number of injected anomalies (values > 3 standard
+      deviations from the column mean). Use python_repl to find them, then
+      produce a final answer that explicitly uses the word "anomaly" or
+      "outlier" and lists at least one offending value. Suggest one possible
+      cause (sensor error, data-entry error, genuine rare event, etc.).
     check: anomaly_detected
     difficulty: hard
     timeout: 180
     setup: "create a sample CSV with injected anomalies"
 
 file_management:
-  - task: "Organize all files in the test_workspace/ directory by file extension into subdirectories (e.g., py/, txt/, md/)."
+  - task: |
+      The current working directory contains a flat set of ~15 files with
+      mixed extensions (.py, .txt, .md). Use the bash tool (or a sequence
+      of file_ops tool calls) to reorganize them so that all .py files move
+      to a py/ subdirectory, all .txt files to a txt/ subdirectory, and all
+      .md files to a md/ subdirectory. The task is complete when at least
+      two subdirectories exist and each contains at least one file matching
+      its extension.
     check: files_organized
     difficulty: easy
-    timeout: 60
+    timeout: 90
     setup: "create test_workspace/ with 20 mixed files"
 
-  - task: "Search all .log files in test_workspace/ for lines containing 'ERROR'. Produce a summary with filename, line number, and error message."
+  - task: |
+      The current working directory contains 5 .log files (server0.log …
+      server4.log) with mixed INFO / ERROR lines. Use bash (with grep -n)
+      or python_repl to find every line containing "ERROR" and produce a
+      final answer with, for each match: the filename (e.g. server2.log),
+      the line number (e.g. "line 8"), and the surrounding error text.
+      Your final answer must contain at least one filename ending in .log
+      AND the word "line" followed by a number.
     check: errors_found
     difficulty: medium
     timeout: 120
     setup: "create test_workspace/ with 5 log files containing mixed log levels"
 
-# Scoring weights
+  - task: |
+      The current working directory contains 10 .txt files: 7 with unique
+      content and 3 that duplicate content already present. Use python_repl
+      (with hashlib.sha1 or hashlib.md5) to hash each file's bytes, keep
+      the first file for each hash, and delete every subsequent duplicate.
+      After cleanup your final answer must list which files were deleted
+      and how many unique files remain. The task is complete when no two
+      files in the workspace share the same content hash.
+    check: duplicates_removed
+    difficulty: hard
+    timeout: 180
+    setup: "create test_workspace/ with 10 files, 3 of which are duplicates of others"
+
+# Scoring weights (0.4 rule + 0.6 LLM judge).
 scoring:
   rule_check_weight: 0.4
   llm_judge_weight: 0.6
-  
-# LLM-as-Judge prompt template
+
+# LLM-as-Judge prompt template. {task_description}, {expected_check}, and
+# {execution_trace} are substituted literally by LLMJudge — any other
+# braces (including the example JSON below) pass through untouched.
 judge_prompt: |
   You are evaluating an AI agent's performance on a task.
-  
+
   Task: {task_description}
   Expected outcome: {expected_check}
-  
+
   Agent's execution trace:
   {execution_trace}
-  
+
   Score the agent on:
-  1. Correctness (0-10): Did it achieve the goal?
+  1. Correctness (0-10): Did it achieve the goal described in the task?
   2. Efficiency (0-10): Did it use a reasonable number of steps?
-  3. Robustness (0-10): Did it handle errors gracefully?
-  
+  3. Robustness (0-10): Did it handle errors gracefully, or did it give up?
+
+  An agent that produced NO tool calls and NO substantive final answer
+  should score LOW on all axes — asking for clarification on a
+  self-contained task is not acceptable.
+
   Return JSON: {"correctness": N, "efficiency": N, "robustness": N, "reasoning": "..."}

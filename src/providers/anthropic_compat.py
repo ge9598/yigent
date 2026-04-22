@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from anthropic import AsyncAnthropic
@@ -35,11 +35,20 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class _ToolUseAccumulator:
-    """Accumulates a single tool_use content block across SSE events."""
+    """Accumulates a single tool_use content block across SSE events.
+
+    The ``arguments_buffer`` is the concatenation of every
+    ``input_json_delta.partial_json`` seen for this block. ``delta_history``
+    keeps the individual fragments in arrival order so we can forensically
+    inspect what the wire sent when parsing fails — MiniMax's /anthropic
+    gateway has been observed to strip long whitespace runs mid-delta,
+    producing JSON that fails to parse at a specific byte offset.
+    """
     index: int
     id: str = ""
     name: str = ""
     arguments_buffer: str = ""
+    delta_history: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -215,10 +224,12 @@ class AnthropicCompatProvider(LLMProvider):
                                 continue
                             acc = accumulators.get(tool_id)
                             if acc is not None:
-                                acc.arguments_buffer += delta.partial_json
+                                fragment = delta.partial_json
+                                acc.arguments_buffer += fragment
+                                acc.delta_history.append(fragment)
                                 yield StreamChunk(
                                     type="tool_call_delta",
-                                    data={"id": acc.id, "fragment": delta.partial_json},
+                                    data={"id": acc.id, "fragment": fragment},
                                     model=model,
                                 )
 
@@ -311,16 +322,36 @@ class AnthropicCompatProvider(LLMProvider):
 
     @staticmethod
     def _parse_accumulated(acc: _ToolUseAccumulator) -> ToolCall:
+        """Parse the accumulated tool_use input JSON.
+
+        On parse failure we attach a sentinel key ``__parse_error__`` to the
+        arguments dict. The executor's error path inspects this to emit a
+        tool_result that tells the model "your arguments were malformed,
+        retry" instead of silently calling the handler with an empty
+        signature — which produces an unhelpful TypeError.
+
+        Forensic logging on failure dumps:
+        - the exact parse error and byte offset
+        - the delta count and individual delta lengths (often reveals a
+          single truncated fragment)
+        - a hex window around the failure offset (observed MiniMax
+          pattern: runs of 0x20 collapsed mid-stream)
+        """
+        if not acc.arguments_buffer:
+            return ToolCall(id=acc.id, name=acc.name, arguments={})
         try:
-            arguments = (
-                json.loads(acc.arguments_buffer) if acc.arguments_buffer else {}
-            )
-        except json.JSONDecodeError:
-            logger.warning(
-                "Failed to parse tool_use input for %s (id=%s): %s",
-                acc.name, acc.id, acc.arguments_buffer,
-            )
-            arguments = {"_raw": acc.arguments_buffer}
+            arguments = json.loads(acc.arguments_buffer)
+        except json.JSONDecodeError as exc:
+            _log_parse_failure(acc, exc)
+            arguments = {
+                "__parse_error__": {
+                    "reason": "tool_use input JSON failed to parse",
+                    "msg": str(exc),
+                    "offset": exc.pos,
+                    "buffer_len": len(acc.arguments_buffer),
+                    "delta_count": len(acc.delta_history),
+                },
+            }
         return ToolCall(id=acc.id, name=acc.name, arguments=arguments)
 
     @staticmethod
@@ -451,3 +482,51 @@ class AnthropicCompatProvider(LLMProvider):
         if isinstance(content, list):
             return f"[{len(content)} blocks]"
         return str(content)[:100]
+
+
+# ---------------------------------------------------------------------------
+# Forensic logging for tool_use input parse failures
+# ---------------------------------------------------------------------------
+
+_HEX_WINDOW: int = 64  # bytes of context around the parse failure offset
+
+
+def _log_parse_failure(
+    acc: _ToolUseAccumulator, exc: json.JSONDecodeError,
+) -> None:
+    """Log everything we know about a failed tool_use input parse.
+
+    Logged at WARNING so it lands in default output without debug flags.
+    Information is structured so it can be grep'd later.
+    """
+    buf = acc.arguments_buffer
+    offset = exc.pos
+    delta_lens = [len(d) for d in acc.delta_history]
+    window_start = max(0, offset - _HEX_WINDOW)
+    window_end = min(len(buf), offset + _HEX_WINDOW)
+    window = buf[window_start:window_end]
+    marker_pos = offset - window_start
+
+    logger.warning(
+        "Failed to parse tool_use input for %s (id=%s): %s at offset %d "
+        "(buffer_len=%d, deltas=%d, delta_lens=%s)",
+        acc.name, acc.id, exc.msg, offset,
+        len(buf), len(acc.delta_history), delta_lens,
+    )
+    logger.warning(
+        "  window [offset %d..%d], pointer at rel=%d:",
+        window_start, window_end, marker_pos,
+    )
+    # Character preview with a pointer line — easier to eyeball than hex.
+    logger.warning("  text: %r", window)
+    try:
+        hex_dump = window.encode("utf-8", errors="replace").hex(" ")
+    except Exception:  # noqa: BLE001
+        hex_dump = "(hex encode failed)"
+    logger.warning("  hex:  %s", hex_dump)
+    # Final 3 deltas verbatim — this is where truncation usually shows up.
+    for i, frag in enumerate(acc.delta_history[-3:]):
+        logger.warning(
+            "  last delta[%d]: %r (len=%d)",
+            len(acc.delta_history) - 3 + i, frag, len(frag),
+        )

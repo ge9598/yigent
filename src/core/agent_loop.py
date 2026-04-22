@@ -101,6 +101,15 @@ async def agent_loop(
     # Track the most recently classified user message so the capability
     # router fires once per NEW user turn, not once per iteration.
     last_classified_user_msg: str | None = None
+    # Track how many conversation messages the trajectory recorder has
+    # already seen, so a user message introduced mid-session (e.g. a
+    # multi-turn chat) is attached to exactly one TurnRecord.
+    last_recorded_conversation_len: int = 0
+    # Cumulative tool calls executed this session; drives the periodic nudge
+    # trigger. Bucketed by floor(count / interval) so we fire at exactly
+    # each interval crossing, even when a turn executes multiple tools at once.
+    nudge_tool_call_count: int = 0
+    last_nudge_bucket: int = 0
 
     while True:
         # 1. Check budget
@@ -349,6 +358,34 @@ async def agent_loop(
                 # If in plan mode, buffer the response as plan content
                 if plan_mode.is_active and text_buffer.strip():
                     plan_mode.append(text_buffer)
+                if trajectory is not None and hasattr(trajectory, "record_turn"):
+                    user_msg_for_record = _pick_new_user_msg(
+                        conversation, last_recorded_conversation_len,
+                    )
+                    trajectory.record_turn(
+                        assistant_msg=final_msg,
+                        user_msg=user_msg_for_record,
+                        tool_calls=[],
+                        tool_results=[],
+                        reasoning_text=reasoning_text or None,
+                    )
+                    last_recorded_conversation_len = len(conversation)
+                # Skill auto-creation on successful complex tasks. Gates
+                # (tool count, distinct tools, dedup) live inside
+                # skill_creator.maybe_create_skill; any failure is logged
+                # and does not surface to the user.
+                if (
+                    learning is not None
+                    and hasattr(learning, "skill_creator")
+                    and hasattr(learning, "recorder")
+                ):
+                    try:
+                        await learning.skill_creator.maybe_create_skill(
+                            learning.recorder.turns,
+                            outcome="success",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Skill creator raised: %s", exc)
                 yield FinalAnswerEvent(content=text_buffer)
                 await _fire("session_end", reason="final_answer")
                 return
@@ -376,6 +413,18 @@ async def agent_loop(
             conversation.append(assistant_msg)
             assistant_msg_appended = True
 
+            if trajectory is not None and hasattr(trajectory, "record_turn"):
+                user_msg_for_record = _pick_new_user_msg(
+                    conversation[:-1], last_recorded_conversation_len,
+                )
+                trajectory.record_turn(
+                    assistant_msg=assistant_msg,
+                    user_msg=user_msg_for_record,
+                    tool_calls=list(tool_calls),
+                    tool_results=[],
+                    reasoning_text=reasoning_text or None,
+                )
+
             # If the streaming dispatch already kicked off the tools, just
             # collect them. Otherwise (e.g. provider that doesn't emit
             # tool_call_complete until done), fall back to the batch path.
@@ -386,6 +435,33 @@ async def agent_loop(
             for result in results:
                 yield ToolResultEvent(result=result)
                 conversation.append(result.to_message())
+            if trajectory is not None and hasattr(trajectory, "attach_tool_results"):
+                trajectory.attach_tool_results(list(results))
+            last_recorded_conversation_len = len(conversation)
+
+            # Periodic nudge: count actual tool calls, fire once per
+            # interval crossing. Learning container must expose
+            # ``nudge`` (NudgeEngine-like) and ``recorder`` (TrajectoryRecorder);
+            # anything else silently skips.
+            nudge_tool_call_count += len(tool_calls)
+            if (
+                learning is not None
+                and hasattr(learning, "nudge")
+                and hasattr(learning, "recorder")
+                and config.agent.nudge_interval > 0
+                and nudge_tool_call_count // config.agent.nudge_interval
+                > last_nudge_bucket
+            ):
+                last_nudge_bucket = (
+                    nudge_tool_call_count // config.agent.nudge_interval
+                )
+                try:
+                    await learning.nudge.maybe_nudge(
+                        learning.recorder.turns,
+                        session_id=getattr(learning, "session_id", "unknown"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Periodic nudge raised: %s", exc)
         except (KeyboardInterrupt, asyncio.CancelledError) as exc:
             interrupted = True
             logger.warning("Agent loop interrupted: %s", type(exc).__name__)
@@ -465,6 +541,23 @@ async def agent_loop(
             )
 
         # Loop continues — model sees tool results next turn
+
+
+def _pick_new_user_msg(
+    conversation: list[Message],
+    last_recorded_len: int,
+) -> Message | None:
+    """Return the most recent user message introduced AFTER the last recorded
+    turn boundary, or None if no new user message has arrived.
+
+    The trajectory recorder attaches each user message to exactly one turn —
+    the next turn after the user spoke. Subsequent agentic turns (tool calls
+    without new user input) record ``user_msg=None``.
+    """
+    for msg in conversation[last_recorded_len:]:
+        if msg.get("role") == "user" and msg.get("content"):
+            return msg
+    return None
 
 
 def _assemble_messages(
