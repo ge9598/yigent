@@ -101,6 +101,30 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 - ~~L2 semantic memory (Qdrant)~~ — text-only via L1 FTS5, matching Claude Code and Hermes (which both ship without vector memory). Decision recorded 2026-04-19. Procedural memory is handled by markdown skills (Phase 3 `skill_creator`), not embeddings.
 - ~~`docker-compose.yml` Qdrant service~~ — no longer needed.
 
+## Phase 4 — L3 self-evolution (planned, not started)
+
+See `docs/DESIGN_PHILOSOPHY.md §5` for the full architecture-level plan.
+The Hermes ecosystem distinguishes three layers of learning; Phase 3
+shipped L1 (skill sedimentation) and L2 (skill refinement), and Phase 4
+closes L3 (model self-evolution). This is the payoff layer — Yigent's
+reason-to-exist according to CLAUDE.md's design intent.
+
+Phase 4 modules (planned, interfaces sketched in DESIGN_PHILOSOPHY.md):
+
+- [ ] `src/learning/reward_annotator.py` — fill `reward=None` fields in trajectory RL transitions using benchmark scores / outcome labels / downstream skill-usage signals
+- [ ] `src/learning/training_pipeline.py` — dedup + filter + version trajectories into SFT (jsonl) and RL (parquet) datasets
+- [ ] `src/learning/trainer.py` — thin wrapper around Axolotl (SFT path) and trl.GRPOTrainer (RL path). LoRA-only output.
+- [ ] `src/providers/model_version_manager.py` — extends resolver with `models/{base_id}/v{N}/adapter.safetensors` + manifest
+- [ ] `src/eval/regression_detector.py` — benchmark-gated promotion: new version retained iff `avg_score` and `consistency_score` don't regress beyond tolerance
+- [ ] `src/learning/evolution_cycle.py` + `python -m src.learning.evolve` entry point — orchestrates the 9-step cycle
+- [ ] Demonstrable cycle: baseline → evolve → benchmark shows ≥5% improvement on at least one domain
+
+Scope boundaries:
+- LoRA-only (no full-model fine-tunes)
+- One base-model at a time
+- Reward from benchmark scores only (no human preference / RLHF yet)
+- Single-GPU training only
+
 ## Test count timeline
 
 | Milestone | Tests |
@@ -137,11 +161,16 @@ Tracked but not in the current sprint. None blocking learning loop / eval.
 | + Phase 3 Unit 5 (eval tasks + rule checks + LLM judge) | 499 |
 | + Phase 3 Unit 6 (benchmark runner + markdown reporter) | 514 |
 | + Phase 3 Unit 7 (FastAPI + SSE server) | 526 |
+| + post-merge fixes (judge template, parse-error sentinel, YOLO breaker, task prompts, bash cwd, fixture split, stricter research rules) | 549 |
 
 ## Current focus
 
-> Phase 3 complete — 8 code units + README delivered (plan:
-> ~/.claude/plans/phase-3-todo-logical-gem.md). 526 tests passing.
+> Phase 3 merged to master (16 commits on feature/phase-3-learning).
+> 549 tests passing. docs/DESIGN_PHILOSOPHY.md lays out the L3 plan.
+> **Phase 4 (L3 self-evolution) is the next major chunk** — see
+> docs/DESIGN_PHILOSOPHY.md §5 for architecture, §5.4 for the minimum
+> viable deliverable (one full evolve cycle showing measurable
+> improvement on at least one benchmark domain).
 > Remaining: run `python -m src.eval.benchmark --suite all` against a
 > real provider to produce docs/EVAL_REPORT.md numbers, then record the
 > demo video.

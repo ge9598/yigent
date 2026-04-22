@@ -1,10 +1,19 @@
 # Yigent Harness
 
-## Why
+## Design intent (read this first)
 
-General-purpose agent harness combining Claude Code's reliability engineering (streaming tool execution, Plan mode, 5-layer compression) with Hermes Agent's learning loop (periodic nudge, auto-created skills, trajectory export). Built from scratch in Python — no LangGraph, no framework dependency. Targets ByteDance Seed "通用Agent研究工程师" role.
+Yigent's shape is **deliberately split**:
+
+- **Harness = Claude Code–style.** Streaming tool execution, Plan mode, 5-layer compression, permission gate as architecture (not prompt), 8 lifecycle hooks, deferred tool loading via ToolSearch, multi-agent (Main/Fork/Subagent). Every "how a harness executes" decision defers to how CC does it. This is the reliable-execution substrate.
+- **Learning loop = Hermes Agent–style, with explicit self-evolution as the goal.** Periodic nudge, skill auto-creation from successful trajectories, skill self-improvement with rollback, always-on trajectory recording (ShareGPT + RL transitions). Hermes's most valuable property — **continuous iterative evolution of the agent's procedural knowledge** — is what Yigent is ultimately built for.
+
+Phase 3 shipped L1 (skill sedimentation) and L2 (skill improvement).
+**Phase 4's target is L3 — model self-evolution via trajectory → training → redeployment, the Hermes-self-evolution direction.** See `docs/DESIGN_PHILOSOPHY.md` for the full rationale, the "blood-lineage" table of which subsystem borrows from which reference, and the L3 architecture-level plan.
+
+Built from scratch in Python — no LangGraph, no framework dependency. Targets ByteDance Seed "通用Agent研究工程师" role.
 
 Design doc with full rationale: @docs/ARCHITECTURE.md
+Philosophy + L3 roadmap: @docs/DESIGN_PHILOSOPHY.md
 
 ## What (project map)
 
@@ -102,18 +111,20 @@ For implementation status and next steps: @docs/STATUS.md
 When implementing a specific module, consult the relevant reference:
 
 **Agent Loop / Streaming / Interruption / Permissions:**
-- Claude Code source analysis (architecture + 12 harness mechanisms): https://github.com/sanbuphy/claude-code-source-code
+- claw-code (third-party CC reimplementation in Python + Rust; parallel crates: `rust/crates/runtime` has 43 files covering conversation/permissions/compact/hooks/mcp/sandbox — good map of the CC feature surface): https://github.com/ge9598/claw-code
 - Claude Code source deep dive (Fork, StreamingToolExecutor, 5-layer compression, Plan mode): https://zhuanlan.zhihu.com/p/2022442135182406883
 - Claude Code 两万字核心机制详解 (Plan mode enforcement, ToolSearch, context compression details): https://zhuanlan.zhihu.com/p/2022443175361388953
 - Claude Code 51万行源码解读 (design philosophy, file structure, async generator pattern): https://zhuanlan.zhihu.com/p/2022433246449780672
 - B站视频 程序员鱼皮 (11个隐藏设计: YOLO shadow classifier, circuit breaker): https://bilibili.com/video/BV1ZB9EBmEAU
 
-**Learning Loop / Memory / Skills / Trajectory / Provider:**
+**Learning Loop / Memory / Skills / Trajectory / Provider — the self-evolution direction:**
+- Hermes Agent (source): https://github.com/NousResearch/hermes-agent — key files for Phase 3: `agent/trajectory.py`, `agent/memory_manager.py`, `agent/skill_commands.py`, `agent/skill_utils.py`, and the background-review prompts in `run_agent.py:2761-2793`
 - Hermes Agent architecture (official): https://hermes-agent.nousresearch.com/docs/developer-guide/architecture
 - Hermes Agent loop internals (turn lifecycle, budget, fallback, tool execution): https://hermes-agent.nousresearch.com/docs/developer-guide/agent-loop
 - Hermes context compression and caching (dual compression, 4-phase algorithm, prompt caching): https://hermes-agent.nousresearch.com/docs/developer-guide/context-compression-and-caching
 - Hermes prompt assembly: https://hermes-agent.nousresearch.com/docs/developer-guide/prompt-assembly
 - Inside Hermes Agent (learning loop, 4-layer memory, periodic nudge, skill creation): https://mranand.substack.com/p/inside-hermes-agent-how-a-self-improving
+- **hermes-agent-self-evolution** (the L3 reference — DSPy/GEPA optimizer, MIPROv2, trajectory → training → redeployment loop): https://github.com/NousResearch/hermes-agent-self-evolution
 
 **Progressive tutorial (build agent from scratch):**
 - learn-claude-code (19 sessions, s01→s19): https://github.com/shareAI-lab/learn-claude-code
