@@ -148,3 +148,22 @@ async def test_judge_no_provider_returns_zero():
     result = await judge.judge("task", "check", _simple_trajectory())
     assert result.score == 0.0
     assert "no aux provider" in result.reasoning
+
+
+async def test_judge_template_with_literal_braces_does_not_crash():
+    """Regression: the default judge prompt in configs/eval_tasks.yaml
+    contains a literal `{"correctness": N, ...}` example JSON. str.format
+    would raise KeyError on those braces; the judge must substitute
+    placeholders without choking on unrelated braces."""
+    template = (
+        "Task: {task_description}\n"
+        "Check: {expected_check}\n"
+        "Trace: {execution_trace}\n"
+        'Return JSON: {"correctness": N, "efficiency": N, "robustness": N}'
+    )
+    provider = _mock_provider_text(
+        '{"correctness": 7, "efficiency": 7, "robustness": 7, "reasoning": ""}'
+    )
+    judge = LLMJudge(provider, prompt_template=template)
+    result = await judge.judge("do it", "code_executes", _simple_trajectory())
+    assert result.correctness == 7

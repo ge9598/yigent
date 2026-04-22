@@ -80,10 +80,14 @@ class LLMJudge:
         if self._provider is None:
             return JudgeResult.zero("no aux provider")
         trace = _format_trajectory(trajectory)
-        prompt = self._template.format(
-            task_description=task_description,
-            expected_check=expected_check,
-            execution_trace=trace,
+        # Literal placeholder substitution instead of str.format to avoid
+        # KeyError on the `{"correctness": N, ...}` example JSON that
+        # prompt templates naturally contain.
+        prompt = (
+            self._template
+            .replace("{task_description}", task_description)
+            .replace("{expected_check}", expected_check)
+            .replace("{execution_trace}", trace)
         )
 
         for attempt in (1, 2):
