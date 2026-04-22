@@ -77,3 +77,72 @@ async def test_bash_cwd_does_not_leak_across_calls(tmp_path: Path):
     out_b = await _bash_handler(_ctx(ws_b), command="ls")
     assert "only_in_a.txt" in out_a and "only_in_b.txt" not in out_a
     assert "only_in_b.txt" in out_b and "only_in_a.txt" not in out_b
+
+
+# ---------------------------------------------------------------------------
+# file_ops.py: read/write/list_dir/search_files must honor ctx.working_dir
+# for relative paths, or relative writes end up in the CLI's cwd (repo root).
+# Observed in Phase 3 benchmark runs: agent wrote "test_workspace/" and
+# "buggy.py" that appeared at the repo root instead of in the per-task
+# workspace. Regression covers all four file-ops handlers.
+# ---------------------------------------------------------------------------
+
+
+async def test_write_file_relative_path_lands_in_working_dir(tmp_path: Path):
+    from src.tools.file_ops import _write_file_handler
+
+    ctx = _ctx(tmp_path)
+    result = await _write_file_handler(ctx, path="hello.txt", content="hi")
+
+    # File must be in tmp_path, NOT in the test process's cwd
+    assert (tmp_path / "hello.txt").exists()
+    assert (tmp_path / "hello.txt").read_text(encoding="utf-8") == "hi"
+    assert "Wrote" in result
+
+
+async def test_write_file_absolute_path_passes_through(tmp_path: Path):
+    from src.tools.file_ops import _write_file_handler
+
+    ws = tmp_path / "a"
+    ws.mkdir()
+    ctx = _ctx(ws)  # working_dir is a subdir
+    target = tmp_path / "b" / "out.txt"
+    result = await _write_file_handler(ctx, path=str(target), content="x")
+
+    # Absolute path is honored as-is and NOT nested under working_dir
+    assert target.exists()
+    # Working dir should not have grown a file
+    assert list(ws.iterdir()) == []
+    assert "Wrote" in result
+
+
+async def test_read_file_relative_path_resolves_under_working_dir(tmp_path: Path):
+    from src.tools.file_ops import _read_file_handler
+
+    (tmp_path / "note.md").write_text("# header\nbody\n", encoding="utf-8")
+    ctx = _ctx(tmp_path)
+
+    result = await _read_file_handler(ctx, path="note.md")
+    assert "header" in result and "body" in result
+
+
+async def test_list_dir_relative_resolves_under_working_dir(tmp_path: Path):
+    from src.tools.file_ops import _list_dir_handler
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "marker.txt").write_text("", encoding="utf-8")
+    ctx = _ctx(tmp_path)
+
+    result = await _list_dir_handler(ctx, path="sub")
+    assert "marker.txt" in result
+
+
+async def test_search_files_relative_resolves_under_working_dir(tmp_path: Path):
+    from src.tools.file_ops import _search_files_handler
+
+    (tmp_path / "app.py").write_text("TOKEN = 'secret'\n", encoding="utf-8")
+    ctx = _ctx(tmp_path)
+
+    result = await _search_files_handler(ctx, pattern="TOKEN", path=".")
+    assert "TOKEN" in result
+    assert "app.py" in result

@@ -1,4 +1,12 @@
-"""File operation tools: read_file, write_file, list_dir, search_files."""
+"""File operation tools: read_file, write_file, list_dir, search_files.
+
+All four handlers take ``ctx`` and resolve relative paths against
+``ctx.working_dir`` (not the Python process's cwd). Absolute paths are
+left untouched. Without this, tools like ``write_file`` would silently
+write relative paths into whatever dir the CLI was launched from — a
+bug that previously caused benchmark runs to create stray
+``test_workspace/`` and ``buggy.py`` in the repo root.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +15,24 @@ import os
 import re
 from pathlib import Path
 
-from src.core.types import PermissionLevel, ToolDefinition, ToolSchema
+from src.core.types import PermissionLevel, ToolContext, ToolDefinition, ToolSchema
 
 from .registry import register
+
+
+def _resolve_under(ctx: ToolContext, raw_path: str) -> Path:
+    """Resolve ``raw_path`` relative to ``ctx.working_dir``.
+
+    Absolute paths pass through untouched. Relative paths are joined
+    with the working dir. If no working dir is configured, falls back
+    to Python's cwd (Phase 1 behavior, preserved for tests that don't
+    bother setting working_dir).
+    """
+    p = Path(raw_path)
+    if p.is_absolute():
+        return p
+    wd = ctx.working_dir if ctx.working_dir is not None else Path.cwd()
+    return Path(wd) / p
 
 # Directories to skip in traversal (both list_dir and search_files).
 _SKIP_DIRS = {
@@ -45,9 +68,11 @@ def _is_binary_file(path: Path) -> bool:
 # read_file
 # ---------------------------------------------------------------------------
 
-async def _read_file_handler(path: str, offset: int = 0, limit: int = 2000) -> str:
+async def _read_file_handler(
+    ctx: ToolContext, path: str, offset: int = 0, limit: int = 2000,
+) -> str:
     def _sync() -> str:
-        p = Path(path)
+        p = _resolve_under(ctx, path)
         if not p.exists():
             return f"Error: file not found: {path}"
         if not p.is_file():
@@ -73,6 +98,7 @@ register(ToolDefinition(
     name="read_file",
     description="Read a text file and return its contents with line numbers. Rejects binary files.",
     handler=_read_file_handler,
+    needs_context=True,
     schema=ToolSchema(
         name="read_file",
         description="Read a text file and return its contents with line numbers.",
@@ -95,9 +121,11 @@ register(ToolDefinition(
 # write_file
 # ---------------------------------------------------------------------------
 
-async def _write_file_handler(path: str, content: str) -> str:
+async def _write_file_handler(
+    ctx: ToolContext, path: str, content: str,
+) -> str:
     def _sync() -> str:
-        p = Path(path)
+        p = _resolve_under(ctx, path)
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             tmp = p.with_suffix(p.suffix + ".tmp")
@@ -115,6 +143,7 @@ register(ToolDefinition(
     name="write_file",
     description="Write content to a file, creating parent directories as needed. Overwrites existing files.",
     handler=_write_file_handler,
+    needs_context=True,
     schema=ToolSchema(
         name="write_file",
         description="Write content to a file. Creates parent dirs. Atomic via temp-file + rename.",
@@ -136,9 +165,11 @@ register(ToolDefinition(
 # list_dir
 # ---------------------------------------------------------------------------
 
-async def _list_dir_handler(path: str = ".", depth: int = 2) -> str:
+async def _list_dir_handler(
+    ctx: ToolContext, path: str = ".", depth: int = 2,
+) -> str:
     def _sync() -> str:
-        root = Path(path)
+        root = _resolve_under(ctx, path)
         if not root.exists():
             return f"Error: path not found: {path}"
         if not root.is_dir():
@@ -175,6 +206,7 @@ register(ToolDefinition(
     name="list_dir",
     description="List directory contents recursively as a tree, up to a given depth.",
     handler=_list_dir_handler,
+    needs_context=True,
     schema=ToolSchema(
         name="list_dir",
         description="Tree listing of a directory. Skips .git, __pycache__, node_modules, .venv, etc.",
@@ -199,6 +231,7 @@ _MAX_MATCHES = 50
 
 
 async def _search_files_handler(
+    ctx: ToolContext,
     pattern: str,
     path: str = ".",
     glob: str = "**/*",
@@ -209,7 +242,7 @@ async def _search_files_handler(
         except re.error as e:
             return f"Error: invalid regex '{pattern}': {e}"
 
-        root = Path(path)
+        root = _resolve_under(ctx, path)
         if not root.exists():
             return f"Error: path not found: {path}"
 
@@ -249,6 +282,7 @@ register(ToolDefinition(
     name="search_files",
     description="Search for a regex pattern across files in a directory tree.",
     handler=_search_files_handler,
+    needs_context=True,
     schema=ToolSchema(
         name="search_files",
         description="Regex search across files. Returns 'file:line:content' matches (max 50).",
