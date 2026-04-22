@@ -18,6 +18,11 @@ coding:
     timeout: 240
 
 research:
+  - task: "Name the three most-used Python HTTP client libraries and list one distinguishing feature per library."
+    check: content_quality
+    difficulty: easy
+    timeout: 90
+
   - task: "Summarize the three main RAG architectures (Naive, Advanced, Modular) and their trade-offs in a structured format."
     check: content_quality
     difficulty: medium
@@ -34,6 +39,12 @@ data_analysis:
     difficulty: easy
     timeout: 120
     setup: "create a sample CSV with 5 columns and 100 rows"
+
+  - task: "Group the provided CSV by its 'category' column and report the count and mean of the 'value' column per group. Output a summary table."
+    check: has_groupby
+    difficulty: medium
+    timeout: 150
+    setup: "create a sample CSV with category and value columns, 3 categories, 60 rows"
 
   - task: "Find anomalies in the provided dataset. An anomaly is any value more than 3 standard deviations from the column mean. List them and suggest possible causes."
     check: anomaly_detected
@@ -53,6 +64,12 @@ file_management:
     difficulty: medium
     timeout: 120
     setup: "create test_workspace/ with 5 log files containing mixed log levels"
+
+  - task: "Find all duplicate files in test_workspace/ by content hash, preserve the first occurrence of each, and delete the rest. Report what was deleted."
+    check: duplicates_removed
+    difficulty: hard
+    timeout: 180
+    setup: "create test_workspace/ with 10 files, 3 of which are duplicates of others"
 
 # Scoring weights
 scoring:
