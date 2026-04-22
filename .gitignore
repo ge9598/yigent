@@ -15,6 +15,7 @@ plans/
 trajectories/
 benchmarks/
 benchmark_runs/
+test_workspace/
 skills/*.md
 !skills/.gitkeep
 
