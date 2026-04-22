@@ -105,6 +105,11 @@ async def agent_loop(
     # already seen, so a user message introduced mid-session (e.g. a
     # multi-turn chat) is attached to exactly one TurnRecord.
     last_recorded_conversation_len: int = 0
+    # Cumulative tool calls executed this session; drives the periodic nudge
+    # trigger. Bucketed by floor(count / interval) so we fire at exactly
+    # each interval crossing, even when a turn executes multiple tools at once.
+    nudge_tool_call_count: int = 0
+    last_nudge_bucket: int = 0
 
     while True:
         # 1. Check budget
@@ -417,6 +422,30 @@ async def agent_loop(
             if trajectory is not None and hasattr(trajectory, "attach_tool_results"):
                 trajectory.attach_tool_results(list(results))
             last_recorded_conversation_len = len(conversation)
+
+            # Periodic nudge: count actual tool calls, fire once per
+            # interval crossing. Learning container must expose
+            # ``nudge`` (NudgeEngine-like) and ``recorder`` (TrajectoryRecorder);
+            # anything else silently skips.
+            nudge_tool_call_count += len(tool_calls)
+            if (
+                learning is not None
+                and hasattr(learning, "nudge")
+                and hasattr(learning, "recorder")
+                and config.agent.nudge_interval > 0
+                and nudge_tool_call_count // config.agent.nudge_interval
+                > last_nudge_bucket
+            ):
+                last_nudge_bucket = (
+                    nudge_tool_call_count // config.agent.nudge_interval
+                )
+                try:
+                    await learning.nudge.maybe_nudge(
+                        learning.recorder.turns,
+                        session_id=getattr(learning, "session_id", "unknown"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Periodic nudge raised: %s", exc)
         except (KeyboardInterrupt, asyncio.CancelledError) as exc:
             interrupted = True
             logger.warning("Agent loop interrupted: %s", type(exc).__name__)
