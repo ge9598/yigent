@@ -16,6 +16,9 @@ trajectories/
 benchmarks/
 benchmark_runs/
 test_workspace/
+
+# Comparison reports — internal analysis, not published
+docs/*COMPARISON*.md
 skills/*.md
 !skills/.gitkeep
 
