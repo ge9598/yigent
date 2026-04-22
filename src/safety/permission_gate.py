@@ -58,13 +58,22 @@ class PermissionGate:
         hooks: HookSystem | None = None,
         yolo_mode: bool = False,
         aux_provider: object | None = None,
+        yolo_breaker_threshold: int = 3,
     ) -> None:
+        from src.context.circuit_breaker import CircuitBreaker
+
         self._registry = registry
         self._ctx = ctx
         self._hooks = hooks
         self._yolo = yolo_mode
         self._aux_provider = aux_provider
         self._last_block_reason: str = ""
+        # Trip the YOLO shadow classifier off after N consecutive aux-LLM
+        # failures (upstream overload, key expired, etc.). Regex pre-filter
+        # still runs — only the aux-LLM step short-circuits to "safe".
+        # Without this, every tool call pays a round-trip + timeout when
+        # the aux provider is sticky-down.
+        self._yolo_breaker = CircuitBreaker(threshold=yolo_breaker_threshold)
 
     # -- public --------------------------------------------------------------
 
@@ -197,9 +206,15 @@ class PermissionGate:
                 logger.warning("YOLO regex caught dangerous: %s", pattern)
                 return "dangerous"
 
-        # Aux-LLM step (skipped if no provider).
+        # Aux-LLM step (skipped if no provider OR breaker tripped).
         provider = getattr(self, "_aux_provider", None)
         if provider is None:
+            return "safe"
+        if self._yolo_breaker.is_open:
+            # Regex pre-filter already ran above — if it didn't catch this,
+            # defaulting to safe is the same thing we'd do after an aux-LLM
+            # failure anyway. Saves a round-trip + timeout per call while
+            # aux is down.
             return "safe"
         # Cache by (tool, args-hash) to avoid re-classifying identical calls.
         import hashlib, json
@@ -246,9 +261,23 @@ class PermissionGate:
                 classification = "safe"  # unknown = err on the side of letting
                                          # the operator proceed (they enabled YOLO)
             cache[key] = classification
+            self._yolo_breaker.record_success()
             return classification
         except Exception as exc:  # noqa: BLE001
-            logger.warning("YOLO shadow classifier failed: %s — defaulting safe", exc)
+            self._yolo_breaker.record_failure()
+            if self._yolo_breaker.is_open:
+                logger.warning(
+                    "YOLO shadow classifier failed: %s — breaker tripped "
+                    "after %d consecutive failures, skipping aux-LLM step "
+                    "for remainder of session (regex pre-filter still active)",
+                    exc, self._yolo_breaker.failures,
+                )
+            else:
+                logger.warning(
+                    "YOLO shadow classifier failed: %s — defaulting safe "
+                    "(%d/%d before breaker trips)",
+                    exc, self._yolo_breaker.failures, self._yolo_breaker.threshold,
+                )
             return "safe"
 
     # -- internals -----------------------------------------------------------
