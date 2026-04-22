@@ -197,6 +197,29 @@ def _prepare_workspace(task: EvalTask, root: Path) -> Path:
             (workspace / f"u{i}.txt").write_text(c, encoding="utf-8")
         for i in range(3):
             (workspace / f"dup{i}.txt").write_text(unique[i], encoding="utf-8")
+    if "indexerror" in s or "buggy" in s:
+        # A small script where line 15 attempts to index beyond the list.
+        # The fix is obvious (use len() check or try/except) — this is a
+        # canary task, not a hard debugging exercise.
+        buggy = (
+            "def process(items):\n"
+            "    total = 0\n"
+            "    for i in items:\n"
+            "        total += i\n"
+            "    return total\n"
+            "\n"
+            "\n"
+            "def pick_third(items):\n"
+            "    # Expected to return the 3rd element but crashes on short lists.\n"
+            "    return items[2]\n"
+            "\n"
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    data = [1, 2]\n"
+            "    print(pick_third(data))  # IndexError on line 15\n"
+            "    print(process(data))\n"
+        )
+        (workspace / "buggy.py").write_text(buggy, encoding="utf-8")
     return workspace
 
 
