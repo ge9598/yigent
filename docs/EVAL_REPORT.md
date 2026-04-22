@@ -1,41 +1,41 @@
 # Yigent Benchmark Report
 
-Generated: 2026-04-22T14:20:02
-Tasks: **12** | Duration: **1250.1s** | Skills created: **0**
+Generated: 2026-04-22T22:15:05
+Tasks: **12** | Duration: **748.5s** | Skills created: **0**
 
 ## Summary
 
-- **Overall completion rate:** 83%
-- **Overall avg score:** 5.80 / 10
-- **Avg steps per task:** 5.3
-- **Cross-domain consistency:** 0.67
+- **Overall completion rate:** 100%
+- **Overall avg score:** 7.55 / 10
+- **Avg steps per task:** 2.1
+- **Cross-domain consistency:** 1.00
 - **Error recovery rate:** 100%
 
 ## Per-domain metrics
 
 | Domain | Completion | Avg score | Avg steps |
 |---|---|---|---|
-| coding | 100% | 6.27 | 5.0 |
-| data_analysis | 100% | 7.47 | 8.3 |
-| file_management | 33% | 4.20 | 8.0 |
-| research | 100% | 5.27 | 0.0 |
+| coding | 100% | 8.27 | 3.3 |
+| data_analysis | 100% | 8.00 | 2.3 |
+| file_management | 100% | 7.87 | 2.7 |
+| research | 100% | 6.07 | 0.0 |
 
 ## Per-task results
 
 | Domain | Difficulty | Passed | Rule | Judge | Final | Steps | Duration |
 |---|---|---|---|---|---|---|---|
-| coding | easy | ✓ | 10.0 | 2.7 | 5.60 | 2 | 36.9s |
-| coding | hard | ✓ | 9.0 | 6.7 | 7.60 | 11 | 116.8s |
-| coding | medium | ✓ | 8.0 | 4.0 | 5.60 | 2 | 39.8s |
-| data_analysis | easy | ✓ | 9.0 | 6.3 | 7.40 | 6 | 118.1s |
-| data_analysis | hard | ✓ | 8.0 | 6.0 | 6.80 | 11 | 156.4s |
-| data_analysis | medium | ✓ | 9.0 | 7.7 | 8.20 | 8 | 89.0s |
-| file_management | easy | ✗ | 0.0 | 8.3 | 5.00 | 6 | 75.6s |
-| file_management | hard | ✓ | 9.0 | 5.0 | 6.60 | 11 | 168.2s |
-| file_management | medium | ✗ | 0.0 | 1.7 | 1.00 | 7 | 120.0s |
-| research | easy | ✓ | 9.0 | 3.7 | 5.80 | 0 | 14.3s |
-| research | hard | ✓ | 8.0 | 2.3 | 4.60 | 0 | 34.8s |
-| research | medium | ✓ | 9.0 | 3.0 | 5.40 | 0 | 15.8s |
+| coding | easy | ✓ | 10.0 | 8.0 | 8.80 | 2 | 34.5s |
+| coding | hard | ✓ | 9.0 | 5.7 | 7.00 | 6 | 107.1s |
+| coding | medium | ✓ | 8.0 | 9.7 | 9.00 | 2 | 25.4s |
+| data_analysis | easy | ✓ | 9.0 | 8.0 | 8.40 | 2 | 52.3s |
+| data_analysis | hard | ✓ | 8.0 | 6.7 | 7.20 | 3 | 32.5s |
+| data_analysis | medium | ✓ | 9.0 | 8.0 | 8.40 | 2 | 34.3s |
+| file_management | easy | ✓ | 9.0 | 5.0 | 6.60 | 3 | 39.8s |
+| file_management | hard | ✓ | 9.0 | 10.0 | 9.60 | 4 | 52.6s |
+| file_management | medium | ✓ | 9.0 | 6.3 | 7.40 | 1 | 22.1s |
+| research | easy | ✓ | 10.0 | 4.0 | 6.40 | 0 | 10.0s |
+| research | hard | ✓ | 9.0 | 4.7 | 6.40 | 0 | 52.1s |
+| research | medium | ✓ | 10.0 | 2.3 | 5.40 | 0 | 26.4s |
 
 ## Task details
 
@@ -49,8 +49,8 @@ observed the tests passing in the repl output.
 
 
 - Rule check (`code_executes`): ✓ score=10.0 — execution tool ran without error
-- Judge: correctness=2, efficiency=4, robustness=2
-  > The agent sent code with syntax errors and never completed the quicksort implementation. The _qs function is missing critical code (the partition logic, i assignment continuation, swapping, and recursive calls). The 'PASS' results are inconsistent with the broken code provided and appear to be from either cached execution or erroneous output. The agent did not successfully implement quicksort or demonstrate working tests.
+- Judge: correctness=9, efficiency=7, robustness=8
+  > Agent successfully implemented quicksort with all three required test cases (empty list, already-sorted list, reverse-sorted list) and confirmed they all passed in the repl output. The agent made two tool calls - the first failed with a truncation error, but it recovered and completed the task successfully on the second attempt. While not maximally efficient (required retry), it demonstrated resilience by not giving up and ultimately achieving the goal.
 
 ### coding / hard
 
@@ -68,8 +68,8 @@ task is not complete until both have happened.
 
 
 - Rule check (`bug_fixed`): ✓ score=9.0 — executed twice, final clean
-- Judge: correctness=7, efficiency=5, robustness=8
-  > The agent successfully achieved the functional goal: reproduced the IndexError crash and verified the fix works. However, it did not use the specified python_repl tool as required - it encountered a ModuleNotFoundError with python_repl and switched to bash with python3 instead, which is not what the task specified. The agent also created buggy.py itself (via write_file) rather than finding it already present, which suggests it may have been in a different working directory context. While the agent showed good problem-solving by finding workarounds and never gave up, it didn't follow the exact tool requirements of the task. The core objective (crash + fix verification) was met, earning partial credit.
+- Judge: correctness=5, efficiency=5, robustness=7
+  > The agent completed the fix and final confirmation, but failed to properly reproduce the crash. The three python_repl attempts produced ModuleNotFoundError and exec/open errors, NOT the expected IndexError. The agent prematurely declared 'The crash is reproduced' even though the errors shown were about file execution issues, not the list index out of range. The fix was implemented and confirmed working in the final step, so the goal was ultimately achieved - but the required 'crash reproduction' was not properly observed. The agent showed persistence (didn't give up) but lacked precision in reproducing the specific bug before fixing it.
 
 ### coding / medium
 
@@ -83,8 +83,8 @@ write_file for this task.
 
 
 - Rule check (`refactor_quality`): ✓ score=8.0 — read and write_file both used
-- Judge: correctness=3, efficiency=6, robustness=3
-  > The agent used both required tools (read_file and write_file), but failed to properly complete the task. The read_file result showed the file contained a `pick_third` function, not the `process` function described in the task. Instead of recognizing this mismatch and either asking for clarification or properly refactoring the existing function, the agent invented a new `process` function from scratch. This means: (1) the refactoring wasn't based on the actual file content, (2) any existing logic in the file was lost, and (3) the agent assumed facts not in evidence. Correctness is low because the output doesn't reflect proper refactoring of the actual file. Efficiency is moderate because only 2 tool calls were used. Robustness is low because the agent didn't gracefully handle the discrepancy between the task description and actual file contents—it should have flagged the mismatch rather than fabricating a solution.
+- Judge: correctness=9, efficiency=10, robustness=10
+  > The agent correctly read the file and wrote a refactored version with the sum logic extracted into _sum_items(items) and process() calling that helper. Public behavior is preserved. The agent used exactly the required tools (read_file and write_file) in a minimal number of steps (2), demonstrating high efficiency. No errors occurred; the task was completed successfully. The slight deduction from correctness is because the trace shows a truncated main block in the written content, though the tool reported 222 bytes written successfully, suggesting the full file was written. The core refactoring goal was fully achieved.
 
 ### data_analysis / easy
 
@@ -97,8 +97,8 @@ complete until your final answer reports those three statistics.
 
 
 - Rule check (`has_statistics`): ✓ score=9.0 — found mean, median, std
-- Judge: correctness=6, efficiency=6, robustness=7
-  > The agent successfully located the data.csv file in a subdirectory and computed statistics for at least column 'a' (mean: 49.5000, median: 49.5000, std: 29.011). However, the final answer appears truncated and only shows statistics for column 'a', not all 5 numeric columns as required. The agent handled errors gracefully (pandas unavailable, file not found) by trying alternatives, but the task appears incomplete as the summary doesn't show all 5 columns' statistics. The agent demonstrated persistence and problem-solving but didn't fully complete the output required by the task.
+- Judge: correctness=7, efficiency=8, robustness=9
+  > The agent successfully computed mean, median, and std for the numeric columns despite an initial pandas import failure. It gracefully recovered by using the csv module instead of giving up. However, the final written summary only displays complete statistics for column 'a' and omits columns b, c, d, and e from the summary table, though their statistics were computed. The task requirements are met since the summary explicitly mentions 'mean', 'median', and 'std' for at least one column (a), but full completeness would have shown all 5 columns.
 
 ### data_analysis / hard
 
@@ -111,8 +111,8 @@ cause (sensor error, data-entry error, genuine rare event, etc.).
 
 
 - Rule check (`anomaly_detected`): ✓ score=8.0 — anomaly/outlier mentioned in answer
-- Judge: correctness=7, efficiency=5, robustness=6
-  > The agent successfully located the data.csv file after multiple failed attempts (pandas unavailable, file not in expected location) and eventually performed the 3-sigma analysis on the hard dataset, identifying value 999 as an anomaly across multiple columns. The final answer included the word 'anomalies/outliers', listed offending values (999), and attempted to suggest a cause. However, correctness is reduced because the agent didn't show the complete calculation (the trace was truncated), and it analyzed all three datasets unnecessarily. Efficiency suffered from the many failed initial attempts to load data and the decision to process multiple datasets when only one was required. Robustness was moderate - the agent recovered from errors and didn't give up, but took a circuitous path to success. The task was ultimately completed but with significant wasted effort.
+- Judge: correctness=6, efficiency=7, robustness=7
+  > The agent successfully detected an anomaly in column 'x' (value 999.0 at row 100, exceeding the 3-sigma threshold of 294.8996). However, the execution trace shows the final answer was truncated/incomplete (the table was cut off mid-sentence). Additionally, the agent never provided a suggested possible cause for the anomaly as explicitly required by the task (e.g., sensor error, data-entry error, genuine rare event). The agent handled the pandas ModuleNotFoundError gracefully by switching to the csv module, demonstrating good error recovery. However, the failed initial pandas attempt was unnecessary, suggesting the agent should have checked available libraries first or used csv module from the start.
 
 ### data_analysis / medium
 
@@ -125,8 +125,8 @@ the per-group counts.
 
 
 - Rule check (`has_groupby`): ✓ score=9.0 — groupby + count present
-- Judge: correctness=9, efficiency=6, robustness=8
-  > The agent successfully achieved the goal: it correctly identified the correct data.csv file (in benchmark_runs/data_analysis_medium/), performed a group by operation on the category column, and reported per-group counts (all 20) and means for each of the 3 categories. The word 'group by' appears in the final answer. The main deduction in correctness is that the agent initially tried the wrong file (data_analysis_easy) before finding the correct one with the expected 'category,value' format. For efficiency, the agent took 8 tool calls total, including multiple failed attempts (wrong file path, wrong file format, pandas not available). While the errors were handled reasonably well (falling back from pandas to csv module, using find to locate the file), the process could have been more efficient by checking file headers earlier or trying multiple paths in parallel. For robustness, the agent handled errors gracefully without giving up - when pandas wasn't available it used csv module, when the initial file wasn't found it searched subdirectories, and when one file had the wrong format it tried another until finding the correct one.
+- Judge: correctness=8, efficiency=7, robustness=9
+  > The agent successfully achieved the task goal. It performed a groupby operation (mentioning 'groupby' in the final answer) and reported per-group counts (20 for each category) and means for each category. The agent initially attempted to use pandas but encountered a ModuleNotFoundError. Instead of giving up, it gracefully adapted by using pure Python (csv module and collections.defaultdict) to achieve the same result. This demonstrates good error handling and robustness. The only minor deduction is that the final answer's table formatting appears truncated in the trace, but the substantive results are correct and complete.
 
 ### file_management / easy
 
@@ -139,9 +139,9 @@ two subdirectories exist and each contains at least one file matching
 its extension.
 
 
-- Rule check (`files_organized`): ✗ score=0.0 — not enough subdirectories
-- Judge: correctness=9, efficiency=7, robustness=9
-  > The agent successfully achieved the task goal: py/ contains buggy.py and md/ contains CLAUDE.md and README.md, satisfying the requirement of at least two subdirectories with matching files. The agent lost some efficiency points by making two incorrect path assumptions (/d/play/yigent and D:/play/yigent) before discovering the correct path via pwd (/mnt/d/play/yigent). The txt/ directory was created but remains empty since no .txt files existed in the original set. The agent demonstrated good error recovery by adapting when initial cd commands failed and proceeding with the correct path. Minor deduction from perfect correctness only because the txt/ subdirectory is empty, though this is expected given the source files available.
+- Rule check (`files_organized`): ✓ score=9.0 — 3 subdirs with files
+- Judge: correctness=4, efficiency=7, robustness=4
+  > The agent created the three subdirectories and moved the one .md file that existed to md/. However, the agent's final claim that it moved 'all 5 .py files' and 'all 5 .txt files' is factually incorrect—the initial ls output showed only 2 files total (f0.md and f0), with no .py or .txt files present. The agent invented file counts that don't match reality. The task requires at least two subdirectories to contain files matching their extension, but only md/ has content; py/ and txt/ are empty. While the agent completed the task partially (created directories, moved available .md file), it failed to accurately report what files existed and wrongly inflated its accomplishments.
 
 ### file_management / hard
 
@@ -155,8 +155,8 @@ files in the workspace share the same content hash.
 
 
 - Rule check (`duplicates_removed`): ✓ score=9.0 — 7 unique files, no dupes
-- Judge: correctness=4, efficiency=5, robustness=6
-  > The agent achieved the core goal of removing duplicate files (ended with no duplicate hashes), but there are significant issues. 1) The task stated 10 .txt files (7 unique, 3 duplicates) but the agent found 22 files and deleted 7, which is inconsistent with the stated problem. 2) The agent had an IndentationError on first attempt, found too many files initially (including .venv), encountered a YOLO classifier block, and required multiple attempts to verify the correct workspace. 3) The final answer correctly stated which files were deleted and claimed no duplicates remain, but the numbers don't align with the original task description (10 files → should leave 7, but agent ended with 15). The agent did recover from errors and completed the task, but with poor accuracy regarding the expected input conditions.
+- Judge: correctness=10, efficiency=10, robustness=10
+  > The agent successfully completed the task. It correctly identified all 10 .txt files, hashed them using sha1, grouped them by hash to identify duplicates (dup0.txt duplicate of u0.txt, dup1.txt duplicate of u1.txt, dup2.txt duplicate of u2.txt), deleted all 3 duplicates while keeping the first occurrence in each group, and verified that 7 unique files remain with no shared hashes. The agent used an efficient 4-step approach (find files, hash/group, delete duplicates, verify). All operations completed without errors, demonstrating robust execution.
 
 ### file_management / medium
 
@@ -169,48 +169,50 @@ Your final answer must contain at least one filename ending in .log
 AND the word "line" followed by a number.
 
 
-- Rule check (`errors_found`): ✗ score=0.0 — missing: filename, line
-- Judge: correctness=0, efficiency=2, robustness=3
-  > The agent attempted multiple approaches to locate the .log files (grep, find, ls commands) but failed to find them. It never successfully executed the core task of extracting ERROR lines from the log files. The agent did not adapt to the missing files and ultimately gave up without providing any final answer. The broad `find / -name "*.log"` command was inefficient and likely failed or would take a long time. No substantive output was produced, and no structured answer with filename, line number, and error text was ever provided. The agent needs to better handle scenarios where files are not found and should iterate on alternative approaches more systematically rather than abandoning the task.
-- Error: `timeout after 120s`
+- Rule check (`errors_found`): ✓ score=9.0 — filename + line number present
+- Judge: correctness=4, efficiency=9, robustness=6
+  > The agent executed a single efficient grep command and provided a table with the matches it could parse. However, the output from the command was truncated in the trace, causing the agent's final answer to omit many ERROR lines (e.g., from server1.log through server4.log) and even the full error text for the last entry. Therefore the answer is only partially correct. The use of a single tool call shows good efficiency, and the agent did not crash or give up, indicating reasonable robustness, but it failed to handle the incomplete output and did not attempt to retrieve the full data, which lowers the robustness score.
 
 ### research / easy
 
-> Name the three most-used Python HTTP client libraries (e.g. requests,
-httpx, urllib3) and list ONE distinguishing feature for each. Answer in
-your own words — no tools required, no files to write. Your final
-answer must be at least a few sentences, not one line.
+> Name the three most-used Python HTTP client libraries (requests,
+httpx, urllib3) and list ONE distinguishing feature for each. Answer
+in your own words — no tools required, no files to write. Your
+final answer MUST mention each of the three library names by name
+(not just one of them).
 
 
-- Rule check (`content_quality`): ✓ score=9.0 — substantive answer (987 chars)
-- Judge: correctness=3, efficiency=5, robustness=3
-  > The agent only partially fulfilled the task by listing only one library (requests) and truncating its distinguishing feature, leaving out the other two required libraries (httpx, urllib3). It completed the response in a single step, showing reasonable efficiency, but the incomplete answer means the core requirement was not met, indicating low robustness.
+- Rule check (`content_http_libs`): ✓ score=10.0 — all HTTP libs present: requests, httpx, urllib3
+- Judge: correctness=2, efficiency=8, robustness=2
+  > The agent only fully described 'requests' and left 'httpx' partially explained (cut off after 'first‑class support for') and omitted 'urllib3' entirely. The answer therefore fails to meet the requirement of naming all three libraries with one distinguishing feature each, resulting in low correctness. The execution was a single, direct response with no tool use, so efficiency is high. However, the agent did not recover from the incomplete output, showing poor robustness.
 
 ### research / hard
 
 > Compare vLLM and SGLang along four dimensions: throughput, latency,
 memory efficiency, and supported features. Produce a markdown table
-(use pipe `|` syntax) with one row per dimension and one column per
-system. Include specific numbers where you are confident; if you are
-not sure of a number, state your uncertainty rather than making one
-up. Answer from your own knowledge.
+(pipe `|` syntax) with one row per dimension. Include specific
+numbers where confident; state uncertainty otherwise. Answer from
+your own knowledge. Your answer MUST mention both system names
+(vLLM, SGLang) AND all four dimensions — truncation on any row
+will fail the check.
 
 
-- Rule check (`comparison_completeness`): ✓ score=8.0 — comparison present
-- Judge: correctness=2, efficiency=3, robustness=2
-  > The agent produced a severely incomplete response. The table only partially filled in the throughput row, with SGLang's entry cut off mid-sentence. Three of the four required dimensions (latency, memory efficiency, supported features) are entirely missing. No specific numbers or uncertainty statements were provided. The markdown table is incomplete and non-functional. This fails to meet the core task requirements of comparing both systems across all four specified dimensions with either concrete data or explicit uncertainty.
+- Rule check (`comparison_vllm_sglang`): ✓ score=9.0 — both systems + all 4 dimensions present
+- Judge: correctness=3, efficiency=8, robustness=3
+  > The agent provided a partial answer, delivering only the throughput row of the markdown table and leaving the latency, memory‑efficiency and supported‑feature rows missing. It did mention both vLLM and SGLang, but the answer is truncated, failing to satisfy the requirement of covering all four dimensions, which results in a low correctness score. The agent used a single final response step to generate the answer, which is an efficient use of steps given the simplicity of the task, although the output was incomplete. It did not encounter an error that required recovery, but the lack of a complete answer shows limited robustness.
 
 ### research / medium
 
 > Summarise the three main RAG (retrieval-augmented generation)
 architectures — Naive RAG, Advanced RAG, Modular RAG — and describe
 their trade-offs in a structured markdown format (headings or a
-table). Answer from your own knowledge; no tools required. Aim for a
-substantive answer of at least several hundred characters covering
-all three architectures.
+table). Answer from your own knowledge; no tools required. Your
+final answer MUST explicitly name all three — Naive, Advanced, and
+Modular — and describe each briefly. A truncated answer that covers
+only one architecture will fail the check.
 
 
-- Rule check (`content_quality`): ✓ score=9.0 — substantive answer (3032 chars)
-- Judge: correctness=2, efficiency=5, robustness=2
-  > The agent's response was incomplete, only describing the Naive RAG pipeline and providing a partially filled table before cutting off. It never mentioned Advanced RAG or Modular RAG or their trade‑offs, failing to meet the requirement for a comprehensive summary of all three architectures. While the response was generated in a single step (good efficiency), the lack of completion and failure to address the full scope of the task scores low on correctness and robustness.
+- Rule check (`content_rag_architectures`): ✓ score=10.0 — all RAG architectures present: naive, advanced, modular
+- Judge: correctness=2, efficiency=3, robustness=2
+  > The agent began responding with a structured markdown format and started describing Naive RAG, but the response was truncated mid-sentence (the table row '| Aspect |' is incomplete). The agent did not complete descriptions for Advanced RAG or Modular RAG, nor did it provide trade-offs as requested. The task explicitly required naming all three architectures with brief descriptions, but only Naive RAG was started. The truncated output suggests either a system issue or poor completion of the response. The agent did not self-correct or indicate inability to complete the task.
 
