@@ -370,6 +370,22 @@ async def agent_loop(
                         reasoning_text=reasoning_text or None,
                     )
                     last_recorded_conversation_len = len(conversation)
+                # Skill auto-creation on successful complex tasks. Gates
+                # (tool count, distinct tools, dedup) live inside
+                # skill_creator.maybe_create_skill; any failure is logged
+                # and does not surface to the user.
+                if (
+                    learning is not None
+                    and hasattr(learning, "skill_creator")
+                    and hasattr(learning, "recorder")
+                ):
+                    try:
+                        await learning.skill_creator.maybe_create_skill(
+                            learning.recorder.turns,
+                            outcome="success",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Skill creator raised: %s", exc)
                 yield FinalAnswerEvent(content=text_buffer)
                 await _fire("session_end", reason="final_answer")
                 return
