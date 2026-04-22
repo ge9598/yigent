@@ -234,6 +234,29 @@ class StreamingExecutor:
 
     async def _execute_single(self, tc: ToolCall) -> ToolResult:
         """Execute one tool with timeout + error handling."""
+        # Provider-side parse failure: the accumulator could not reconstruct
+        # valid JSON from the tool_use input stream (observed with
+        # MiniMax's /anthropic gateway on long content parameters). Return
+        # an actionable error so the model can retry with different args
+        # instead of hitting a TypeError from an empty handler call.
+        parse_err = tc.arguments.get("__parse_error__") if tc.arguments else None
+        if isinstance(parse_err, dict):
+            return ToolResult(
+                tool_call_id=tc.id, name=tc.name,
+                content=(
+                    f"Error: tool arguments could not be parsed as JSON "
+                    f"({parse_err.get('msg', 'unknown')} at offset "
+                    f"{parse_err.get('offset', '?')}, received "
+                    f"{parse_err.get('buffer_len', 0)} bytes in "
+                    f"{parse_err.get('delta_count', 0)} deltas). "
+                    "This is usually caused by streaming corruption on "
+                    "very long parameter values. Please retry — consider "
+                    "splitting the call into smaller pieces or writing "
+                    "the content in chunks."
+                ),
+                is_error=True,
+            )
+
         handler_info = self._registry.get_handler(tc.name)
         if handler_info is None:
             return ToolResult(

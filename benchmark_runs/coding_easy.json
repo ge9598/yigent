@@ -1,0 +1,14 @@
+{
+  "id": "coding_easy",
+  "conversations": [
+    {
+      "from": "human",
+      "value": "Write a Python function that implements quicksort and include 3 test cases."
+    },
+    {
+      "from": "gpt",
+      "value": "\n\n```python\ndef quicksort(arr):\n    if len(arr) <= 1:\n        return arr\n    pivot = arr[len(arr) // 2]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    return quicksort(left) + middle + quicksort(right)\n\n\n# Test cases\nassert quicksort([3, 1, 4, 1, 5, 9, 2, 6]) == [1, 1, 2, 3, 4, 5, 6, 9]\nassert quicksort([]) == []\nassert quicksort([5, 5, 5, 5]) == [5, 5, 5, 5]\nprint(\"All tests passed.\")\n```",
+      "reasoning": "The user wants a Python function implementing quicksort with 3 test cases. Let me write this directly.\n"
+    }
+  ]
+}
