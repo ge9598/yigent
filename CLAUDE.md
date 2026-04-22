@@ -111,7 +111,8 @@ For implementation status and next steps: @docs/STATUS.md
 When implementing a specific module, consult the relevant reference:
 
 **Agent Loop / Streaming / Interruption / Permissions:**
-- claw-code (third-party CC reimplementation in Python + Rust; parallel crates: `rust/crates/runtime` has 43 files covering conversation/permissions/compact/hooks/mcp/sandbox — good map of the CC feature surface): https://github.com/ge9598/claw-code
+- Claude Code source analysis (sanbuphy/claude-code-source-code) — a detailed public analysis of CC's actual source: full `src/` directory tree (~1884 .ts files, 512K lines), 12 progressive harness mechanisms mapped to real CC files (`query.ts` 785KB = main loop, `QueryEngine.ts`, `StreamingToolExecutor.ts`, `services/compact/`, `memdir/`, `SkillTool/`, `AgentTool/`, `forkSubagent.ts`, etc.). Plus 5 deep-analysis reports on telemetry / codenames / undercover mode / remote control / roadmap. **Read this when you want to know what a real CC module is called or what file it lives in:** https://github.com/sanbuphy/claude-code-source-code
+- claw-code (third-party CC reimplementation in Python + Rust; `rust/crates/runtime/` has 43 files covering conversation/permissions/compact/hooks/mcp/sandbox — useful as a second implementation perspective on CC's shape): https://github.com/ge9598/claw-code
 - Claude Code source deep dive (Fork, StreamingToolExecutor, 5-layer compression, Plan mode): https://zhuanlan.zhihu.com/p/2022442135182406883
 - Claude Code 两万字核心机制详解 (Plan mode enforcement, ToolSearch, context compression details): https://zhuanlan.zhihu.com/p/2022443175361388953
 - Claude Code 51万行源码解读 (design philosophy, file structure, async generator pattern): https://zhuanlan.zhihu.com/p/2022433246449780672

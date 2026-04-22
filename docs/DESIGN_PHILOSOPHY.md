@@ -29,8 +29,8 @@ Each row says: module → where we took the idea from → what's literally share
 
 | Yigent module | Reference | Shared with reference | Yigent-specific |
 |---|---|---|---|
-| `src/core/agent_loop.py` | CC's `QueryEngine` / claw-code `rust/crates/runtime/src/conversation.rs` (`AssistantEvent` enum at lines 29-40) | Async generator shape, ReAct cycle, event types (TokenDelta, ToolUse, MessageStop), TurnStartedEvent → Reasoning → Token progression | Injection seams for `trajectory=None` / `learning=None` / `assembler=None` so every feature is swappable |
-| `src/core/streaming_executor.py` | CC's StreamingToolExecutor (described in zhuanlan 2022442135182406883) | Real streaming dispatch (tool starts before model finishes emitting), sibling-abort on fatal error, tombstone repair for Ctrl+C | Parse-error sentinel `__parse_error__` (our `anthropic_compat.py` invention, not in CC) |
+| `src/core/agent_loop.py` | CC's `query.ts` (785KB, main while-loop — sanbuphy analysis) + `QueryEngine.ts` (SDK lifecycle) / claw-code `rust/crates/runtime/src/conversation.rs` (`AssistantEvent` enum at lines 29-40) | Async generator shape, ReAct cycle, event types (TokenDelta, ToolUse, MessageStop), TurnStartedEvent → Reasoning → Token progression | Injection seams for `trajectory=None` / `learning=None` / `assembler=None` so every feature is swappable |
+| `src/core/streaming_executor.py` | CC's `services/tools/StreamingToolExecutor.ts` (sanbuphy analysis + zhuanlan 2022442135182406883) | Real streaming dispatch (tool starts before model finishes emitting), sibling-abort on fatal error, tombstone repair for Ctrl+C | Parse-error sentinel `__parse_error__` (our `anthropic_compat.py` invention, not in CC) |
 | `src/core/plan_mode.py` | CC's Plan mode | Plan → Approve → Execute triphasic cycle, permission-layer enforcement, deferred tools | — |
 | `src/context/engine.py` + `src/context/assembler.py` | CC 5-layer compression, dynamic thresholds `ctx_win - 40K/-33K/-23K` (zhuanlan 2022443175361388953) | 5-layer shape, per-layer circuit breaker, dynamic thresholds, cache-friendly static zone | Explicit `compression_cursor` bookkeeping persisted across turns |
 | `src/safety/permission_gate.py` | CC 5-layer chain + YOLO shadow classifier (bilibili 鱼皮 video) | Schema → self-check → plan-mode → hook → level order; YOLO + aux-LLM fallback | Circuit breaker around the shadow classifier (our addition after MiniMax 529 overloads) |
@@ -251,14 +251,17 @@ A lookup table for future-you:
 
 | If you're working on... | Read first |
 |---|---|
-| Agent loop changes | `src/core/agent_loop.py` + `docs/ARCHITECTURE.md §A` + claw-code `rust/crates/runtime/src/conversation.rs` for reference shape |
-| Permission / safety | `src/safety/permission_gate.py` + `docs/ARCHITECTURE.md §G` + CC Plan-mode deep-dive zhuanlan articles |
-| Context compression | `src/context/engine.py` + `docs/ARCHITECTURE.md §I` + Hermes `context_compressor.py` for reference |
+| **"What does CC do about X?"** | sanbuphy/claude-code-source-code README — full `src/` tree + 12 harness mechanisms + data flow diagrams mapped to real CC file names (`query.ts`, `QueryEngine.ts`, `StreamingToolExecutor.ts`, `services/compact/`, `AgentTool/`, etc.) |
+| Agent loop changes | `src/core/agent_loop.py` + `docs/ARCHITECTURE.md §A` + sanbuphy README "Data Flow: A Single Query Lifecycle" + claw-code `rust/crates/runtime/src/conversation.rs` for shape validation |
+| Permission / safety | `src/safety/permission_gate.py` + `docs/ARCHITECTURE.md §G` + sanbuphy README "Tool System Architecture" section + CC Plan-mode deep-dive zhuanlan articles |
+| Context compression | `src/context/engine.py` + `docs/ARCHITECTURE.md §I` + sanbuphy README "Context Management" section + Hermes `context_compressor.py` |
 | New provider | `src/providers/base.py` + `src/providers/resolver.py` + `docs/PROVIDER_COMPARISON.md` (gitignored, ask first) |
-| New tool | `src/tools/` (look at `file_ops.py` for a simple example; `mcp_adapter.py` for external tool integration) |
-| Skill lifecycle | `src/learning/skill_creator.py` / `skill_improver.py` + `src/memory/skill_index.py`. Hermes counterpart: `agent/skill_commands.py` + `run_agent.py:2772` prompts |
+| New tool | `src/tools/` (look at `file_ops.py` for a simple example; `mcp_adapter.py` for external tool integration); sanbuphy README "Tool Interface" section shows CC's Tool shape |
+| Skill lifecycle | `src/learning/skill_creator.py` / `skill_improver.py` + `src/memory/skill_index.py`. Hermes counterpart: `agent/skill_commands.py` + `run_agent.py:2772` prompts. CC counterpart: `src/tools/SkillTool/` per sanbuphy README |
+| Sub-agents / multi-agent | `src/core/multi_agent.py`. CC counterpart per sanbuphy: `src/tools/AgentTool/`, `forkSubagent.ts`, `src/tasks/{LocalShellTask, LocalAgentTask, InProcessTeammateTask, DreamTask}/`, `utils/swarm/` |
 | Trajectory / training | `src/learning/trajectory.py` + §5 above for L3 plan |
 | Evaluation | `src/eval/benchmark.py` + `configs/eval_tasks.yaml` + `src/eval/judges/rule_checks.py` |
+| Feature flags / growth / telemetry | sanbuphy `docs/en/01-telemetry-and-privacy.md` + `docs/en/04-remote-control-and-killswitches.md` (CC's hidden flag and kill-switch system — useful reference for what a production harness exposes) |
 | Why a decision was made | `docs/DECISIONS.md` (12 numbered decisions) |
 
 ---
