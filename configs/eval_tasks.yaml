@@ -53,11 +53,12 @@ coding:
 
 research:
   - task: |
-      Name the three most-used Python HTTP client libraries (e.g. requests,
-      httpx, urllib3) and list ONE distinguishing feature for each. Answer in
-      your own words — no tools required, no files to write. Your final
-      answer must be at least a few sentences, not one line.
-    check: content_quality
+      Name the three most-used Python HTTP client libraries (requests,
+      httpx, urllib3) and list ONE distinguishing feature for each. Answer
+      in your own words — no tools required, no files to write. Your
+      final answer MUST mention each of the three library names by name
+      (not just one of them).
+    check: content_http_libs
     difficulty: easy
     timeout: 90
 
@@ -65,21 +66,23 @@ research:
       Summarise the three main RAG (retrieval-augmented generation)
       architectures — Naive RAG, Advanced RAG, Modular RAG — and describe
       their trade-offs in a structured markdown format (headings or a
-      table). Answer from your own knowledge; no tools required. Aim for a
-      substantive answer of at least several hundred characters covering
-      all three architectures.
-    check: content_quality
+      table). Answer from your own knowledge; no tools required. Your
+      final answer MUST explicitly name all three — Naive, Advanced, and
+      Modular — and describe each briefly. A truncated answer that covers
+      only one architecture will fail the check.
+    check: content_rag_architectures
     difficulty: medium
     timeout: 120
 
   - task: |
       Compare vLLM and SGLang along four dimensions: throughput, latency,
       memory efficiency, and supported features. Produce a markdown table
-      (use pipe `|` syntax) with one row per dimension and one column per
-      system. Include specific numbers where you are confident; if you are
-      not sure of a number, state your uncertainty rather than making one
-      up. Answer from your own knowledge.
-    check: comparison_completeness
+      (pipe `|` syntax) with one row per dimension. Include specific
+      numbers where confident; state uncertainty otherwise. Answer from
+      your own knowledge. Your answer MUST mention both system names
+      (vLLM, SGLang) AND all four dimensions — truncation on any row
+      will fail the check.
+    check: comparison_vllm_sglang
     difficulty: hard
     timeout: 180
 

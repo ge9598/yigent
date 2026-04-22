@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import sys
+from pathlib import Path
 
-from src.core.types import PermissionLevel, ToolDefinition, ToolSchema
+from src.core.types import PermissionLevel, ToolContext, ToolDefinition, ToolSchema
 
 from .registry import register
 
@@ -61,14 +63,34 @@ def _truncate_output(text: str) -> str:
     )
 
 
-async def _bash_handler(command: str, timeout: int = 60) -> str:
+async def _bash_handler(
+    ctx: ToolContext, command: str, timeout: int = 60,
+) -> str:
     argv, shell_label = _build_argv(command)
+
+    # Honor ctx.working_dir so the command runs where the agent thinks it
+    # is. Without this on Windows, git-bash's $PWD inherits the parent
+    # shell's cwd (typically the repo root) — the agent ends up running
+    # mv/rm in the wrong directory and corrupts the repo. Pre-flight
+    # check that the dir actually exists so we fail fast with a clear
+    # error instead of silently falling back to the parent cwd.
+    cwd_str: str | None = None
+    if ctx.working_dir is not None:
+        wd = Path(ctx.working_dir)
+        if wd.is_dir():
+            cwd_str = str(wd)
+        else:
+            return (
+                f"Error: working_dir {wd} does not exist — "
+                "bash will not run in a stale cwd"
+            )
 
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd_str,
         )
     except FileNotFoundError as e:
         return f"Error: shell executable not found: {e}"
@@ -95,9 +117,14 @@ register(ToolDefinition(
     name="bash",
     description="Execute a shell command. Uses git-bash on Windows, bash on Unix. Returns combined stdout+stderr.",
     handler=_bash_handler,
+    needs_context=True,
     schema=ToolSchema(
         name="bash",
-        description="Execute a shell command. Output combined stdout+stderr. Timeout default 60s.",
+        description=(
+            "Execute a shell command in the agent's current working "
+            "directory (no `cd` needed — cwd is already set for you). "
+            "Output combined stdout+stderr. Timeout default 60s."
+        ),
         parameters={
             "type": "object",
             "properties": {

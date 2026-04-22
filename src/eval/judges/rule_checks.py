@@ -132,7 +132,13 @@ def check_bug_fixed(
 def check_content_quality(
     trajectory: list["TurnRecord"], workspace: Path,
 ) -> RuleResult:
-    """Passed if the final answer is substantive (>= 200 chars, not an error)."""
+    """Passed if the final answer is substantive (>= 200 chars, not an error).
+
+    Generic fallback — prefer a topic-specific check (e.g.
+    content_http_libs, content_rag_architectures) when the task has a
+    known required-keyword set. Character count alone gives false
+    positives on truncated answers.
+    """
     text = _final_text(trajectory)
     n = len(text.strip())
     if n < 100:
@@ -140,6 +146,71 @@ def check_content_quality(
     if n >= 500:
         return RuleResult(True, 9.0, f"substantive answer ({n} chars)")
     return RuleResult(True, 7.0, f"answer present ({n} chars)")
+
+
+def _keyword_coverage_check(
+    trajectory: list["TurnRecord"],
+    required: list[str],
+    label: str,
+) -> RuleResult:
+    """Pass if the final answer mentions each required keyword (case-
+    insensitive). Score scales with coverage — partial credit for a
+    partial answer so the dual-channel scoring can distinguish "half
+    right" from "fully wrong"."""
+    text = _final_text(trajectory).lower()
+    found = [kw for kw in required if kw.lower() in text]
+    missing = [kw for kw in required if kw.lower() not in text]
+    coverage = len(found) / max(1, len(required))
+    score = round(coverage * 10.0, 1)
+    if not missing:
+        return RuleResult(True, score, f"all {label} present: {', '.join(found)}")
+    return RuleResult(
+        False, score,
+        f"{label}: found {found or 'none'}, missing {missing}",
+    )
+
+
+def check_content_http_libs(
+    trajectory: list["TurnRecord"], workspace: Path,
+) -> RuleResult:
+    """research/easy — answer must name the three big HTTP client libraries."""
+    return _keyword_coverage_check(
+        trajectory, ["requests", "httpx", "urllib3"], "HTTP libs",
+    )
+
+
+def check_content_rag_architectures(
+    trajectory: list["TurnRecord"], workspace: Path,
+) -> RuleResult:
+    """research/medium — answer must cover all three RAG architectures."""
+    return _keyword_coverage_check(
+        trajectory, ["naive", "advanced", "modular"], "RAG architectures",
+    )
+
+
+def check_comparison_vllm_sglang(
+    trajectory: list["TurnRecord"], workspace: Path,
+) -> RuleResult:
+    """research/hard — comparison must cover vLLM, SGLang, AND all four
+    requested dimensions (throughput, latency, memory, features)."""
+    text = _final_text(trajectory).lower()
+    systems = [s for s in ("vllm", "sglang") if s in text]
+    dimensions = [
+        d for d in ("throughput", "latency", "memory", "feature")
+        if d in text
+    ]
+    if len(systems) < 2:
+        return RuleResult(
+            False, len(systems) * 2.0,
+            f"missing systems: {set(['vllm', 'sglang']) - set(systems)}",
+        )
+    if len(dimensions) < 4:
+        missing = {"throughput", "latency", "memory", "feature"} - set(dimensions)
+        return RuleResult(
+            False, 5.0 + len(dimensions) * 0.5,
+            f"missing dimensions: {missing}",
+        )
+    return RuleResult(True, 9.0, "both systems + all 4 dimensions present")
 
 
 def check_comparison_completeness(
@@ -271,7 +342,10 @@ _CHECKS: dict[str, Callable[[list["TurnRecord"], Path], RuleResult]] = {
     "refactor_quality": check_refactor_quality,
     "bug_fixed": check_bug_fixed,
     "content_quality": check_content_quality,
+    "content_http_libs": check_content_http_libs,
+    "content_rag_architectures": check_content_rag_architectures,
     "comparison_completeness": check_comparison_completeness,
+    "comparison_vllm_sglang": check_comparison_vllm_sglang,
     "has_statistics": check_has_statistics,
     "has_groupby": check_has_groupby,
     "anomaly_detected": check_anomaly_detected,

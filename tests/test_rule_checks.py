@@ -194,3 +194,76 @@ def test_duplicates_removed_fails_on_dupes(tmp_path):
 def test_check_result_carries_check_name(tmp_path):
     r = RuleChecker().check("code_executes", [], tmp_path)
     assert r.check_name == "code_executes"
+
+
+# ---------------------------------------------------------------------------
+# Research topic-specific keyword coverage checks
+# ---------------------------------------------------------------------------
+
+
+def test_content_http_libs_all_three(tmp_path):
+    traj = _trajectory(final_answer=(
+        "The three most-used Python HTTP clients are requests (sync, "
+        "de-facto default), httpx (async + HTTP/2), and urllib3 (low-level)."
+    ))
+    r = RuleChecker().check("content_http_libs", traj, tmp_path)
+    assert r.passed is True
+    assert r.score == 10.0
+
+
+def test_content_http_libs_missing_two(tmp_path):
+    traj = _trajectory(final_answer="The `requests` library is the most popular.")
+    r = RuleChecker().check("content_http_libs", traj, tmp_path)
+    assert r.passed is False
+    assert r.score < 10.0
+    assert "missing" in r.reason.lower()
+
+
+def test_content_rag_architectures_all_three(tmp_path):
+    traj = _trajectory(final_answer=(
+        "## Naive RAG\nSimplest pipeline.\n## Advanced RAG\nRe-ranking etc.\n"
+        "## Modular RAG\nDecoupled components."
+    ))
+    r = RuleChecker().check("content_rag_architectures", traj, tmp_path)
+    assert r.passed is True
+
+
+def test_content_rag_architectures_truncated(tmp_path):
+    """Simulates the truncation bug — only Naive mentioned, rest missing."""
+    traj = _trajectory(final_answer="Naive RAG is the simplest form.")
+    r = RuleChecker().check("content_rag_architectures", traj, tmp_path)
+    assert r.passed is False
+    assert r.score < 10.0
+
+
+def test_comparison_vllm_sglang_complete(tmp_path):
+    traj = _trajectory(final_answer=(
+        "| Dimension | vLLM | SGLang |\n"
+        "|---|---|---|\n"
+        "| throughput | 1x | 1.3x |\n"
+        "| latency | ... | ... |\n"
+        "| memory | ... | ... |\n"
+        "| features | paged attention | radix cache |\n"
+    ))
+    r = RuleChecker().check("comparison_vllm_sglang", traj, tmp_path)
+    assert r.passed is True
+
+
+def test_comparison_vllm_sglang_missing_dimension(tmp_path):
+    """Partial rows (only throughput) must fail now, unlike the old
+    permissive `comparison_completeness` check."""
+    traj = _trajectory(final_answer=(
+        "| Dimension | vLLM | SGLang |\n"
+        "|---|---|---|\n"
+        "| throughput | 1x | 1.3x |\n"
+    ))
+    r = RuleChecker().check("comparison_vllm_sglang", traj, tmp_path)
+    assert r.passed is False
+    assert "missing dimensions" in r.reason
+
+
+def test_comparison_vllm_sglang_missing_system(tmp_path):
+    traj = _trajectory(final_answer="Only vLLM is discussed here; throughput latency memory features")
+    r = RuleChecker().check("comparison_vllm_sglang", traj, tmp_path)
+    assert r.passed is False
+    assert "missing systems" in r.reason

@@ -197,10 +197,39 @@ def _prepare_workspace(task: EvalTask, root: Path) -> Path:
             (workspace / f"u{i}.txt").write_text(c, encoding="utf-8")
         for i in range(3):
             (workspace / f"dup{i}.txt").write_text(unique[i], encoding="utf-8")
-    if "indexerror" in s or "buggy" in s:
-        # A small script where line 15 attempts to index beyond the list.
-        # The fix is obvious (use len() check or try/except) — this is a
-        # canary task, not a hard debugging exercise.
+    # Two shapes of buggy.py depending on which coding task this is:
+    # - bug_fixed (coding/hard): contains pick_third that crashes on line 15
+    # - refactor_quality (coding/medium): contains only process() to be
+    #   refactored, matching the task description exactly
+    # Without this split the agent reads a fixture that contradicts the
+    # prompt and starts fabricating.
+    if task.check == "bug_fixed" or "indexerror" in s:
+        # The prompt promises pick_third's crashing `return items[2]` is
+        # on line 15 — layout padded so that's literally true.
+        buggy = (
+            "# buggy.py — pick_third(items) crashes on line 15 when\n"
+            "# items has fewer than 3 elements.\n"
+            "\n"
+            "\n"
+            "def _identity(x):\n"  # line 5
+            "    return x\n"
+            "\n"
+            "\n"
+            "def _shout(msg):\n"  # line 9
+            "    return msg.upper()\n"
+            "\n"
+            "\n"
+            "def pick_third(items):\n"  # line 13
+            "    # Expected to return the 3rd element — crashes on short lists.\n"
+            "    return items[2]\n"  # line 15
+            "\n"
+            "\n"
+            "if __name__ == '__main__':\n"
+            "    data = [1, 2]\n"
+            "    print(pick_third(data))  # triggers IndexError\n"
+        )
+        (workspace / "buggy.py").write_text(buggy, encoding="utf-8")
+    elif task.check == "refactor_quality" or "refactor" in s:
         buggy = (
             "def process(items):\n"
             "    total = 0\n"
@@ -209,14 +238,8 @@ def _prepare_workspace(task: EvalTask, root: Path) -> Path:
             "    return total\n"
             "\n"
             "\n"
-            "def pick_third(items):\n"
-            "    # Expected to return the 3rd element but crashes on short lists.\n"
-            "    return items[2]\n"
-            "\n"
-            "\n"
             "if __name__ == '__main__':\n"
-            "    data = [1, 2]\n"
-            "    print(pick_third(data))  # IndexError on line 15\n"
+            "    data = [1, 2, 3, 4]\n"
             "    print(process(data))\n"
         )
         (workspace / "buggy.py").write_text(buggy, encoding="utf-8")

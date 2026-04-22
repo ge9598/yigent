@@ -6,8 +6,9 @@ import asyncio
 import os
 import sys
 import tempfile
+from pathlib import Path
 
-from src.core.types import PermissionLevel, ToolDefinition, ToolSchema
+from src.core.types import PermissionLevel, ToolContext, ToolDefinition, ToolSchema
 
 from .registry import register
 
@@ -24,8 +25,23 @@ def _truncate(text: str) -> str:
     )
 
 
-async def _python_repl_handler(code: str, timeout: int = 30) -> str:
+async def _python_repl_handler(
+    ctx: ToolContext, code: str, timeout: int = 30,
+) -> str:
     """Execute Python code in a fresh subprocess. Stateless per call."""
+    # Validate cwd BEFORE creating the temp file so we don't leak it on
+    # the early-return path.
+    cwd_str: str | None = None
+    if ctx.working_dir is not None:
+        wd = Path(ctx.working_dir)
+        if wd.is_dir():
+            cwd_str = str(wd)
+        else:
+            return (
+                f"Error: working_dir {wd} does not exist — "
+                "python_repl will not run in a stale cwd"
+            )
+
     # Write to temp .py (avoids quoting issues with -c for multi-line code)
     fd, tmp_path = tempfile.mkstemp(suffix=".py", text=True)
     try:
@@ -37,6 +53,7 @@ async def _python_repl_handler(code: str, timeout: int = 30) -> str:
                 sys.executable, tmp_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                cwd=cwd_str,
             )
         except FileNotFoundError as e:
             return f"Error: python executable not found: {e}"
@@ -66,9 +83,14 @@ register(ToolDefinition(
     name="python_repl",
     description="Execute Python code in a fresh subprocess. Stateless — each call is isolated.",
     handler=_python_repl_handler,
+    needs_context=True,
     schema=ToolSchema(
         name="python_repl",
-        description="Run Python code. Returns combined stdout+stderr. Each call is a new process.",
+        description=(
+            "Run Python code in a fresh subprocess, with cwd set to the "
+            "agent's current working directory (relative paths like "
+            "'data.csv' resolve there). Returns combined stdout+stderr."
+        ),
         parameters={
             "type": "object",
             "properties": {
