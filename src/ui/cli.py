@@ -425,8 +425,11 @@ async def async_main() -> None:
         try:
             await client.connect(registry)
             mcp_clients.append(client)
-        except Exception as exc:
-            logger.warning("Failed to connect MCP server %r: %s", mcp_cfg.name, exc)
+        except Exception as exc:  # noqa: BLE001 — third-party MCP transport surface
+            logger.warning(
+                "Failed to connect MCP server %r (%s)",
+                mcp_cfg.name, type(exc).__name__,
+            )
 
     try:
         if args.smoke_test:
@@ -443,8 +446,8 @@ async def async_main() -> None:
         for client in mcp_clients:
             try:
                 await client.close()
-            except Exception as exc:
-                logger.debug("Error closing MCP client: %s", exc)
+            except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+                logger.debug("Error closing MCP client: %s", type(exc).__name__)
 
 
 def main() -> None:

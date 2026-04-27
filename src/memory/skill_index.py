@@ -54,6 +54,8 @@ class SkillIndex:
         self._dir = Path(skills_dir)
         self._cache: dict[str, Skill] = {}
         self._tokens: dict[str, set[str]] = {}
+        # mtime-per-slug snapshot for incremental rebuild (audit B10 / Top10 #17).
+        self._mtimes: dict[str, float] = {}
 
     @property
     def dir(self) -> Path:
@@ -73,6 +75,7 @@ class SkillIndex:
         """Re-scan ``skills_dir``. Missing directory is treated as empty."""
         self._cache.clear()
         self._tokens.clear()
+        self._mtimes.clear()
         if not self._dir.exists():
             return
         for path in sorted(self._dir.glob("*.md")):
@@ -83,6 +86,58 @@ class SkillIndex:
                 continue
             self._cache[skill.slug] = skill
             self._tokens[skill.slug] = _skill_tokens(skill)
+            try:
+                self._mtimes[skill.slug] = path.stat().st_mtime
+            except OSError:
+                pass
+
+    def rebuild_incremental(self) -> int:
+        """Refresh only changed/new/deleted skill files. Returns the number
+        of slugs touched (added + updated + removed).
+
+        Cheaper than ``rebuild()`` when the directory holds many skills but
+        only a handful changed since last scan. Audit B10 / Top10 #17.
+        Falls back to a full ``rebuild()`` on the first call (when there's
+        no mtime baseline).
+        """
+        if not self._mtimes:
+            self.rebuild()
+            return len(self._cache)
+        if not self._dir.exists():
+            n = len(self._cache)
+            self._cache.clear()
+            self._tokens.clear()
+            self._mtimes.clear()
+            return n
+
+        seen_slugs: set[str] = set()
+        touched = 0
+        for path in self._dir.glob("*.md"):
+            slug = path.stem
+            seen_slugs.add(slug)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if mtime == self._mtimes.get(slug):
+                continue  # unchanged
+            try:
+                skill = read_skill(path)
+            except SkillFormatError as exc:
+                logger.warning("Skipping malformed skill %s: %s", path.name, exc)
+                continue
+            self._cache[skill.slug] = skill
+            self._tokens[skill.slug] = _skill_tokens(skill)
+            self._mtimes[skill.slug] = mtime
+            touched += 1
+
+        # Drop deleted-on-disk slugs from cache
+        for stale in set(self._cache) - seen_slugs:
+            self._cache.pop(stale, None)
+            self._tokens.pop(stale, None)
+            self._mtimes.pop(stale, None)
+            touched += 1
+        return touched
 
     # ------------------------------------------------------------------
     # Lookup
@@ -152,6 +207,10 @@ class SkillIndex:
         path = write_skill(skill, self._dir)
         self._cache[skill.slug] = skill
         self._tokens[skill.slug] = _skill_tokens(skill)
+        try:
+            self._mtimes[skill.slug] = path.stat().st_mtime
+        except OSError:
+            pass
         return path
 
     def unregister(self, slug: str) -> bool:
@@ -164,6 +223,7 @@ class SkillIndex:
             removed = True
         self._cache.pop(slug, None)
         self._tokens.pop(slug, None)
+        self._mtimes.pop(slug, None)
         return removed
 
 

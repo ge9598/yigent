@@ -32,6 +32,15 @@ if TYPE_CHECKING:
     from src.learning.trajectory import TurnRecord
 
 
+# Pre-compiled patterns used by individual checks. Audit B9 / Top10 #12:
+# previously each call to check_has_groupby / check_errors_found re-compiled
+# these patterns from string literals, paying the regex compiler cost on
+# every benchmark task.
+_ROW_COUNT_RE = re.compile(r"\b\d+\s+rows?\b")
+_FILENAME_RE = re.compile(r"\b[\w.-]+\.(log|txt|py|md)\b", re.IGNORECASE)
+_LINE_NUM_RE = re.compile(r"\b(line\s*\d+|:\d+:)\b", re.IGNORECASE)
+
+
 @dataclass
 class RuleResult:
     passed: bool
@@ -250,7 +259,7 @@ def check_has_groupby(
     """Passed if the agent used groupby (in code OR in output) and reports counts."""
     blob = (_all_assistant_text(trajectory) + "\n" + _tool_outputs(trajectory)).lower()
     has_groupby = "groupby" in blob or "group by" in blob
-    has_count = "count" in blob or re.search(r"\b\d+\s+rows?\b", blob) is not None
+    has_count = "count" in blob or _ROW_COUNT_RE.search(blob) is not None
     if has_groupby and has_count:
         return RuleResult(True, 9.0, "groupby + count present")
     if has_groupby:
@@ -290,8 +299,8 @@ def check_errors_found(
     """Passed if the final answer contains both a filename-looking token
     AND a line-number-looking integer."""
     text = _final_text(trajectory)
-    has_file = bool(re.search(r"\b[\w.-]+\.(log|txt|py|md)\b", text, re.IGNORECASE))
-    has_line = bool(re.search(r"\b(line\s*\d+|:\d+:)\b", text, re.IGNORECASE))
+    has_file = bool(_FILENAME_RE.search(text))
+    has_line = bool(_LINE_NUM_RE.search(text))
     if has_file and has_line:
         return RuleResult(True, 9.0, "filename + line number present")
     parts = []

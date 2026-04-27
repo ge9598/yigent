@@ -1,6 +1,6 @@
 # Implementation status
 
-Last updated: 2026-04-19. 150 tests passing.
+Last updated: 2026-04-27. 614 tests passing.
 
 ## Phase 1: Core loop + basic tools (Week 1) — ✅ DONE
 
@@ -162,11 +162,14 @@ Scope boundaries:
 | + Phase 3 Unit 6 (benchmark runner + markdown reporter) | 514 |
 | + Phase 3 Unit 7 (FastAPI + SSE server) | 526 |
 | + post-merge fixes (judge template, parse-error sentinel, YOLO breaker, task prompts, bash cwd, fixture split, stricter research rules) | 549 |
+| + audit Batch 1 (YOLO fail-safe, capability fast-path, Protocol types, exception logging, config validators) | 575 |
+| + audit Batch 2 (trajectory max_turns, file_ops symlink containment, threshold scaling, async memory I/O, YOLO LRU cache, unified JSON parser) | 604 |
+| + audit Batch 3 (regex pre-compile, NudgeReason enum, secret repr=False, prompt-cache memo, skill incremental rebuild, judge retry temp bump, token cache, A5/A6/A9) | 614 |
 
 ## Current focus
 
-> Phase 3 merged to master (16 commits on feature/phase-3-learning).
-> 549 tests passing. docs/DESIGN_PHILOSOPHY.md lays out the L3 plan.
+> Phase 3 merged to master + 32-issue audit batched fix shipped.
+> 614 tests passing. docs/DESIGN_PHILOSOPHY.md lays out the L3 plan.
 > **Phase 4 (L3 self-evolution) is the next major chunk** — see
 > docs/DESIGN_PHILOSOPHY.md §5 for architecture, §5.4 for the minimum
 > viable deliverable (one full evolve cycle showing measurable

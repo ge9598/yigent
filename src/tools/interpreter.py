@@ -48,6 +48,16 @@ async def _python_repl_handler(
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(code)
 
+        # Belt-and-braces TOCTOU mitigation: tempfile.mkstemp already creates
+        # the file with mode 0600 on POSIX, but reapply explicitly so the
+        # narrow window between fd close and subprocess launch can't be
+        # exploited on shared hosts. Audit A9. No-op on Windows where
+        # POSIX mode bits are largely advisory.
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError:
+            pass
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, tmp_path,

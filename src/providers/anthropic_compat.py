@@ -258,7 +258,7 @@ class AnthropicCompatProvider(LLMProvider):
                         reason = getattr(event.delta, "stop_reason", None)
                         if reason:
                             stop_reason = reason
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — re-raised after pool bookkeeping
             if self._credential_pool is not None:
                 status = getattr(exc, "status_code", None) or getattr(
                     getattr(exc, "response", None), "status_code", None

@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _MAX_CHARS = 2000
 
@@ -51,7 +54,13 @@ class EnvironmentInjector:
         fn = dispatch.get(task_type, self._coding_context)
         try:
             ctx = await fn()
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — env injection must not break the loop
+            # Log so silent context-collection failures are debuggable, but
+            # never propagate — the agent loop must keep going.
+            logger.debug(
+                "env_injector %s context fetch failed (%s)",
+                task_type, type(exc).__name__,
+            )
             ctx = ""
         return ctx[:_MAX_CHARS]
 

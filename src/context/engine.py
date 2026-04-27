@@ -41,28 +41,58 @@ logger = logging.getLogger(__name__)
 # only need rough counts for budget decisions, not exact billing accuracy.
 _TOKENIZER = tiktoken.get_encoding("cl100k_base")
 
+# Per-content token-count memoization (audit B7 / Top10 #19).
+#
+# Each ContextAssembler.assemble() call re-tokenizes the entire conversation
+# to compute the budget — even though most messages are byte-identical to the
+# previous turn (only the latest user/assistant/tool messages are new). This
+# cache keyed by the content string short-circuits the tokenizer for repeats.
+#
+# Bounded LRU so a long session can't grow memory unboundedly. 2048 entries
+# easily covers a 100-turn session with rich tool messages and is small in
+# memory (string keys + int values).
+from collections import OrderedDict
+
+_TOKEN_CACHE: OrderedDict[str, int] = OrderedDict()
+_TOKEN_CACHE_MAX = 2048
+
+
+def _count_tokens(text: str) -> int:
+    """Tokenize a string with LRU-cached results. Audit B7 / Top10 #19."""
+    if not text:
+        return 0
+    cached = _TOKEN_CACHE.get(text)
+    if cached is not None:
+        _TOKEN_CACHE.move_to_end(text)
+        return cached
+    n = len(_TOKENIZER.encode(text))
+    _TOKEN_CACHE[text] = n
+    while len(_TOKEN_CACHE) > _TOKEN_CACHE_MAX:
+        _TOKEN_CACHE.popitem(last=False)
+    return n
+
 
 def estimate_tokens(messages: list[Message] | str) -> int:
     """Rough token count. Adds ~4 tokens of overhead per message envelope."""
     if isinstance(messages, str):
-        return len(_TOKENIZER.encode(messages))
+        return _count_tokens(messages)
     total = 0
     for msg in messages:
         total += 4  # role / separators
         content = msg.get("content")
         if isinstance(content, str):
-            total += len(_TOKENIZER.encode(content))
+            total += _count_tokens(content)
         elif isinstance(content, list):
             for block in content:
                 if isinstance(block, dict):
                     text = block.get("text") or block.get("content") or ""
                     if isinstance(text, str):
-                        total += len(_TOKENIZER.encode(text))
+                        total += _count_tokens(text)
         for tc in msg.get("tool_calls") or []:
             fn = tc.get("function", {}) or {}
             args = fn.get("arguments", "") or ""
             if isinstance(args, str):
-                total += len(_TOKENIZER.encode(args))
+                total += _count_tokens(args)
     return total
 
 

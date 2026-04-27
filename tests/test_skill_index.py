@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.learning.skill_format import (
-    Skill, SkillFormatError, jaccard, read_skill, tokenize,
+    Skill, SkillFormatError, jaccard, read_skill, tokenize, write_skill,
 )
 from src.memory.skill_index import SkillIndex
 
@@ -209,3 +209,58 @@ def test_index_skips_malformed_skill(tmp_path: Path, caplog):
     idx.rebuild()
     assert "good" in idx
     assert "broken" not in idx
+
+
+# ---------------------------------------------------------------------------
+# rebuild_incremental (audit B10 / Top10 #17)
+# ---------------------------------------------------------------------------
+
+
+def test_rebuild_incremental_falls_back_to_full_when_empty(tmp_path):
+    write_skill(_make_skill("alpha", "about alpha"), tmp_path)
+    idx = SkillIndex(tmp_path)
+    n = idx.rebuild_incremental()
+    assert n == 1
+    assert "alpha" in idx
+
+
+def test_rebuild_incremental_skips_unchanged_files(tmp_path, monkeypatch):
+    write_skill(_make_skill("a", "about a"), tmp_path)
+    write_skill(_make_skill("b", "about b"), tmp_path)
+    idx = SkillIndex(tmp_path)
+    idx.rebuild()  # establish mtime baseline
+    # Patch read_skill to track call count — incremental should skip both
+    from src.memory import skill_index as si
+    calls = []
+    real = si.read_skill
+    def spy(p):
+        calls.append(p.stem)
+        return real(p)
+    monkeypatch.setattr(si, "read_skill", spy)
+
+    touched = idx.rebuild_incremental()
+    assert touched == 0
+    assert calls == []  # no file re-read
+
+
+def test_rebuild_incremental_picks_up_new_files(tmp_path):
+    write_skill(_make_skill("a", "about a"), tmp_path)
+    idx = SkillIndex(tmp_path)
+    idx.rebuild()
+    assert "a" in idx and "b" not in idx
+    write_skill(_make_skill("b", "about b"), tmp_path)
+    touched = idx.rebuild_incremental()
+    assert touched == 1
+    assert "b" in idx
+
+
+def test_rebuild_incremental_drops_deleted_files(tmp_path):
+    write_skill(_make_skill("a", "about a"), tmp_path)
+    write_skill(_make_skill("b", "about b"), tmp_path)
+    idx = SkillIndex(tmp_path)
+    idx.rebuild()
+    (tmp_path / "b.md").unlink()
+    touched = idx.rebuild_incremental()
+    assert touched == 1
+    assert "a" in idx
+    assert "b" not in idx

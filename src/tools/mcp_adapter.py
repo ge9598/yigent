@@ -58,9 +58,11 @@ def mcp_tool_to_definition(
             )
         try:
             result = await call_tool(raw_name, kwargs)
-        except Exception as exc:
-            logger.warning("MCP call %s failed: %s", prefixed, exc)
-            return f"MCP tool error: {exc}"
+        except Exception as exc:  # noqa: BLE001 — third-party MCP transport surface
+            # Log only the exception class to avoid leaking stdio command lines
+            # / SSE URLs / auth headers from the MCP transport. Audit A4/A8.
+            logger.warning("MCP call %s failed (%s)", prefixed, type(exc).__name__)
+            return f"MCP tool error: {type(exc).__name__}"
         return _format_mcp_result(result)
 
     schema = ToolSchema(
@@ -202,9 +204,10 @@ class MCPClient:
             try:
                 import sys
                 await self._session_cm.__aexit__(*sys.exc_info())
-            except Exception as cleanup_exc:
+            except Exception as cleanup_exc:  # noqa: BLE001 — best-effort cleanup
                 logger.debug(
-                    "MCP cleanup on failed connect raised: %s", cleanup_exc,
+                    "MCP cleanup on failed connect raised: %s",
+                    type(cleanup_exc).__name__,
                 )
             self._session_cm = None
             self._session = None
@@ -216,8 +219,8 @@ class MCPClient:
             return
         try:
             await self._session_cm.__aexit__(None, None, None)
-        except Exception as exc:
-            logger.debug("MCP session close raised: %s", exc)
+        except Exception as exc:  # noqa: BLE001 — best-effort close
+            logger.debug("MCP session close raised: %s", type(exc).__name__)
         finally:
             self._session = None
             self._session_cm = None
