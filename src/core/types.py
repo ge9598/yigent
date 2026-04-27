@@ -6,7 +6,10 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Coroutine, Literal, TypedDict
+from typing import (
+    TYPE_CHECKING, Any, Callable, Coroutine, Literal, Protocol,
+    TypedDict, runtime_checkable,
+)
 
 from pydantic import BaseModel
 
@@ -342,3 +345,54 @@ class ToolDefinition:
     schema: ToolSchema
     validate: ToolValidator | None = None
     needs_context: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Protocols — structural types for the agent_loop "optional" dependencies
+# ---------------------------------------------------------------------------
+#
+# agent_loop accepts hooks / trajectory / learning as Protocol-typed args so
+# the contract is explicit while still allowing simple test doubles. These
+# are all runtime_checkable: ``isinstance(obj, HookSystemLike)`` works.
+# They're deliberately loose (only the methods agent_loop actually calls).
+# See audit Top-10 #4: before these, the loop used ``object | None`` with
+# ``hasattr(...)`` probes — a typo in the learning module would silently turn
+# nudges off with no error. Protocols let type-checkers + runtime checks
+# catch that.
+
+
+@runtime_checkable
+class HookSystemLike(Protocol):
+    """Fires lifecycle events. agent_loop only needs ``fire()``."""
+
+    async def fire(self, event_name: str, **data: Any) -> Any: ...
+
+
+@runtime_checkable
+class TrajectoryRecorderLike(Protocol):
+    """Always-on trajectory recorder. agent_loop calls record_turn + finalize."""
+
+    def record_turn(
+        self,
+        user_message: str | None,
+        assistant_text: str,
+        tool_calls: list[Any],
+        tool_results: list[Any],
+        reasoning_text: str = "",
+    ) -> None: ...
+
+    def finalize(self, outcome: str = "completed") -> None: ...
+
+
+@runtime_checkable
+class LearningContainerLike(Protocol):
+    """Container with optional nudge / skill_creator / skill_improver attrs.
+
+    agent_loop attribute-probes each slot (they may be None individually)
+    rather than requiring all three. The Protocol documents the surface
+    without forcing every slot to exist.
+    """
+
+    nudge: Any  # NudgeEngineLike | None — checked via hasattr at use site
+    skill_creator: Any
+    skill_improver: Any

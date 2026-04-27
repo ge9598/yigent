@@ -5,10 +5,10 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -21,10 +21,14 @@ class ProviderConfig(BaseModel):
     Unlike the top-level :class:`ProviderSection`, fields here default to empty
     strings so the resolver can tell "not set" from "set to deepseek" and
     fall back to the primary provider's value.
+
+    Secret fields (``api_key``, ``keys``) are marked ``repr=False`` so
+    ``repr(cfg)`` and any logger that stringifies the model do not leak the
+    plaintext secret. Audit A8 / Top10 #15.
     """
     name: str = ""
-    api_key: str = ""
-    keys: list[str] = Field(default_factory=list)
+    api_key: str = Field(default="", repr=False)
+    keys: list[str] = Field(default_factory=list, repr=False)
     strategy: str = "round_robin"
     cooldown_seconds: float = 60.0
     billing_cooldown_seconds: float = 86_400.0  # HTTP 402 → out of credits
@@ -42,8 +46,9 @@ class ProviderConfig(BaseModel):
 
 class ProviderSection(BaseModel):
     name: str = "deepseek"
-    api_key: str = ""
-    keys: list[str] = Field(default_factory=list)
+    # Secrets — see ProviderConfig docstring (Audit A8 / Top10 #15).
+    api_key: str = Field(default="", repr=False)
+    keys: list[str] = Field(default_factory=list, repr=False)
     strategy: str = "round_robin"
     cooldown_seconds: float = 60.0
     billing_cooldown_seconds: float = 86_400.0  # HTTP 402 → out of credits
@@ -52,6 +57,12 @@ class ProviderSection(BaseModel):
     routes: dict[str, dict[str, str]] = Field(default_factory=dict)
     fallback: ProviderConfig | None = None
     auxiliary: ProviderConfig | None = None
+    # When the auxiliary provider's own keys/pool are missing, fall back to
+    # the primary provider's credentials. Convenient for single-key dev
+    # configs but means an aux LLM bug or log leak can compromise the main
+    # key. Set false in production and configure a dedicated aux key.
+    # Audit A5.
+    allow_aux_credential_fallback: bool = True
     # Named providers usable by `routes` (Unit 4 — cross-provider routing).
     # Keyed by provider alias; each value is a ProviderConfig that the resolver
     # instantiates eagerly. Routes can then reference any alias defined here,
@@ -71,6 +82,15 @@ class AgentSection(BaseModel):
     max_iterations: int = 90
     nudge_interval: int = 15
     fork_budget_allocation: int = 20
+
+    @field_validator("max_iterations", "nudge_interval", "fork_budget_allocation")
+    @classmethod
+    def _must_be_positive(cls, v: int, info: Any) -> int:
+        # max_iterations=0 freezes the loop; nudge_interval=0 causes ZeroDivisionError
+        # in the bucket math; fork_budget_allocation=0 starves child agents.
+        if v <= 0:
+            raise ValueError(f"agent.{info.field_name} must be > 0, got {v}")
+        return v
 
 
 class ContextSection(BaseModel):
@@ -133,6 +153,24 @@ class PermissionsSection(BaseModel):
     always_block: list[str] = Field(default_factory=lambda: ["delete_file"])
     yolo_mode: bool = False
 
+    # Tools that must never be silently auto-approved regardless of user config.
+    # Misconfigured auto_allow turns the permission gate into a pass-through for
+    # arbitrary code execution and filesystem mutation. See audit C2.
+    _NEVER_AUTO_ALLOW: ClassVar[frozenset[str]] = frozenset({
+        "bash", "python_repl", "write_file", "edit_file", "delete_file",
+    })
+
+    @field_validator("auto_allow")
+    @classmethod
+    def _no_dangerous_tools_in_auto_allow(cls, v: list[str]) -> list[str]:
+        bad = sorted(set(v) & cls._NEVER_AUTO_ALLOW)
+        if bad:
+            raise ValueError(
+                f"permissions.auto_allow must not contain write/execute tools "
+                f"({', '.join(bad)}); move them to require_approval or always_block"
+            )
+        return v
+
 
 class UISection(BaseModel):
     streaming: bool = True
@@ -144,7 +182,7 @@ class UISection(BaseModel):
 class SearchSection(BaseModel):
     """Web search config. Tavily is the preferred provider."""
     provider: str = "tavily"  # "tavily" | "duckduckgo"
-    tavily_api_key: str = ""
+    tavily_api_key: str = Field(default="", repr=False)  # secret, A8
     max_results: int = 5
     timeout: int = 15
 
@@ -155,8 +193,11 @@ class MCPServerConfig(BaseModel):
     transport: str = "stdio"  # "stdio" | "sse"
     command: list[str] = Field(default_factory=list)  # for stdio
     url: str = ""  # for sse
-    headers: dict[str, str] = Field(default_factory=dict)  # SSE auth/etc.
-    env: dict[str, str] = Field(default_factory=dict)
+    # SSE auth headers and stdio env vars commonly hold secrets
+    # (Authorization: Bearer ..., DB_URL=postgres://user:pass@...). Mark
+    # ``repr=False`` so accidental log statements don't leak them. Audit A8.
+    headers: dict[str, str] = Field(default_factory=dict, repr=False)
+    env: dict[str, str] = Field(default_factory=dict, repr=False)
     # Default permission level for every tool this server exposes. MCP itself
     # has no permission metadata, so we require an explicit opt-in to anything
     # above read_only — write/execute MCP tools must be declared at config

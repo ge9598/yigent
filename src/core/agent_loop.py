@@ -9,10 +9,11 @@ from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 from src.core.iteration_budget import BudgetExhausted
 from src.core.types import (
-    BudgetExhaustedEvent, ErrorEvent, Event, FinalAnswerEvent, Message,
-    PermissionDecision, PlanModeTriggeredEvent, ProviderFallbackEvent,
-    ReasoningDeltaEvent, StreamChunk, ToolCall, ToolCallStartEvent,
-    ToolResultEvent, TokenEvent, TruncatedEvent, TurnStartedEvent,
+    BudgetExhaustedEvent, ErrorEvent, Event, FinalAnswerEvent,
+    HookSystemLike, LearningContainerLike, Message, PermissionDecision,
+    PlanModeTriggeredEvent, ProviderFallbackEvent, ReasoningDeltaEvent,
+    StreamChunk, ToolCall, ToolCallStartEvent, ToolResultEvent,
+    TokenEvent, TrajectoryRecorderLike, TruncatedEvent, TurnStartedEvent,
 )
 
 if TYPE_CHECKING:
@@ -78,9 +79,9 @@ async def agent_loop(
     plan_mode: PlanMode,
     config: AgentConfig,
     permission_callback: PermissionCallback | None = None,
-    hooks: object | None = None,
-    learning: object | None = None,
-    trajectory: object | None = None,
+    hooks: HookSystemLike | None = None,
+    learning: LearningContainerLike | None = None,
+    trajectory: TrajectoryRecorderLike | None = None,
     assembler: ContextAssembler | None = None,
     scenario_router: "ScenarioRouter | None" = None,
     capability_router: "CapabilityRouter | None" = None,

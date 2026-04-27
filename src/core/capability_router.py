@@ -26,6 +26,28 @@ logger = logging.getLogger(__name__)
 _VALID_STRATEGIES = frozenset({"direct", "plan_then_execute"})
 _VALID_CAPABILITIES = frozenset({"search", "coding", "interpreter", "file_ops"})
 
+# Fast-path heuristic: short prompts with no multi-file / multi-step vocabulary
+# skip the aux-LLM classifier entirely. Saves a 10-30s aux roundtrip on trivial
+# messages. See audit Top-10 #2.
+_FAST_PATH_MAX_WORDS = 20
+
+# Keywords that suggest a task genuinely benefits from plan mode. Presence of
+# any of these disables the fast-path even on short prompts.
+_PLAN_TRIGGER_KEYWORDS = frozenset({
+    # Multi-step / multi-file
+    "refactor", "restructure", "reorganize", "rewrite",
+    "migrate", "migration", "redesign",
+    "implement", "build", "create a", "design",
+    "architecture", "architect", "plan",
+    # Project-wide scope
+    "entire", "whole", "all files", "throughout", "codebase",
+    "multiple files", "across files", "system-wide",
+    # Phased work
+    "step by step", "multi-step", "phase", "phases",
+    # Chinese equivalents (users often mix languages)
+    "重构", "整个", "所有", "全部", "设计", "实现", "规划", "分阶段",
+})
+
 _CLASSIFIER_PROMPT = """You are a task complexity classifier.
 
 Given the user's message, output two things:
@@ -76,7 +98,36 @@ class CapabilityRouter:
     def __init__(self, aux_provider: "LLMProvider | None") -> None:
         self._aux = aux_provider
 
+    def fast_path(self, user_message: str) -> RoutingDecision | None:
+        """Return a RoutingDecision without calling the aux LLM, or None.
+
+        Short prompts (≤ _FAST_PATH_MAX_WORDS) with no planning vocabulary are
+        classified as ``direct`` locally. This sidesteps the 10-30s aux-LLM
+        roundtrip every user message was paying — audit Top-10 #2, the
+        "preparing 久" UX bug.
+        """
+        text = (user_message or "").strip()
+        if not text:
+            return RoutingDecision(strategy="direct", reason="empty prompt")
+        word_count = len(text.split())
+        if word_count > _FAST_PATH_MAX_WORDS:
+            return None  # long prompt → let the classifier decide
+        lower = text.lower()
+        for kw in _PLAN_TRIGGER_KEYWORDS:
+            if kw in lower:
+                return None  # planning keyword present → classifier
+        return RoutingDecision(
+            strategy="direct",
+            reason=f"fast-path: short prompt ({word_count} words), no plan keywords",
+        )
+
     async def classify(self, user_message: str) -> RoutingDecision:
+        # Fast-path: short prompts with no planning vocabulary bypass the aux
+        # LLM entirely. See audit Top-10 #2.
+        fast = self.fast_path(user_message)
+        if fast is not None:
+            return fast
+
         if self._aux is None:
             return RoutingDecision(strategy="direct", reason="no aux provider")
 

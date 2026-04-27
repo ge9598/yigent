@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import re
 from typing import TYPE_CHECKING, Awaitable, Callable
 
 from src.core.types import (
@@ -58,8 +59,11 @@ class PermissionGate:
         hooks: HookSystem | None = None,
         yolo_mode: bool = False,
         aux_provider: object | None = None,
-        yolo_breaker_threshold: int = 3,
+        yolo_breaker_threshold: int = 5,
+        yolo_cache_size: int = 128,
     ) -> None:
+        from collections import OrderedDict
+
         from src.context.circuit_breaker import CircuitBreaker
 
         self._registry = registry
@@ -70,10 +74,14 @@ class PermissionGate:
         self._last_block_reason: str = ""
         # Trip the YOLO shadow classifier off after N consecutive aux-LLM
         # failures (upstream overload, key expired, etc.). Regex pre-filter
-        # still runs — only the aux-LLM step short-circuits to "safe".
-        # Without this, every tool call pays a round-trip + timeout when
-        # the aux provider is sticky-down.
+        # still runs — only the aux-LLM step short-circuits to "risky".
+        # Default 5: tolerates a handful of transient 503s without flipping
+        # the breaker. Audit Top10 #10.
         self._yolo_breaker = CircuitBreaker(threshold=yolo_breaker_threshold)
+        # Bounded LRU cache for shadow-classifier results so a long YOLO
+        # session can't monotonically grow memory. Audit Top10 #10.
+        self._yolo_cache: OrderedDict[str, str] = OrderedDict()
+        self._yolo_cache_size = yolo_cache_size
 
     # -- public --------------------------------------------------------------
 
@@ -171,18 +179,22 @@ class PermissionGate:
     # -- Unit 10 — YOLO shadow classifier -----------------------------------
 
     # Regex pre-filter: obviously-bad bash patterns. Hits short-circuit to
-    # "dangerous" without paying for an aux-LLM call.
-    _YOLO_DANGER_PATTERNS = (
-        r"\brm\s+-rf?\s+/(?:\s|$)",          # rm -rf /
-        r"\brm\s+-rf?\s+~(?:\s|$)",          # rm -rf ~
-        r"\bdd\s+.*of=/dev/(?:sd|nvme|hd)",  # dd of=/dev/sda
-        r"\bmkfs\b",                          # mkfs.*
-        r":\(\)\s*\{[^}]*:\|\s*:[^}]*\}\s*;\s*:",  # bash fork bomb
-        r"\bcurl\b[^|]*\|\s*(?:sudo\s+)?(?:bash|sh)\b",   # curl ... | sh
-        r"\bwget\b[^|]*\|\s*(?:sudo\s+)?(?:bash|sh)\b",   # wget ... | sh
-        r"\bchmod\s+(?:-R\s+)?[0-7]*7[0-7]*\s+/(?:bin|etc|usr|var)",
-        r"\bformat\s+[a-z]:",                # Windows: format c:
-        r">\s*/dev/sd[a-z]",                 # > /dev/sda
+    # "dangerous" without paying for an aux-LLM call. Pre-compiled so the
+    # check loop in _yolo_shadow_classify doesn't re-compile on every call
+    # (audit B9 / Top10 #12).
+    _YOLO_DANGER_PATTERNS = tuple(
+        re.compile(p) for p in (
+            r"\brm\s+-rf?\s+/(?:\s|$)",          # rm -rf /
+            r"\brm\s+-rf?\s+~(?:\s|$)",          # rm -rf ~
+            r"\bdd\s+.*of=/dev/(?:sd|nvme|hd)",  # dd of=/dev/sda
+            r"\bmkfs\b",                          # mkfs.*
+            r":\(\)\s*\{[^}]*:\|\s*:[^}]*\}\s*;\s*:",  # bash fork bomb
+            r"\bcurl\b[^|]*\|\s*(?:sudo\s+)?(?:bash|sh)\b",   # curl ... | sh
+            r"\bwget\b[^|]*\|\s*(?:sudo\s+)?(?:bash|sh)\b",   # wget ... | sh
+            r"\bchmod\s+(?:-R\s+)?[0-7]*7[0-7]*\s+/(?:bin|etc|usr|var)",
+            r"\bformat\s+[a-z]:",                # Windows: format c:
+            r">\s*/dev/sd[a-z]",                 # > /dev/sda
+        )
     )
 
     async def _yolo_shadow_classify(self, tc: ToolCall) -> str:
@@ -192,40 +204,46 @@ class PermissionGate:
         bad commands without an LLM call).
         Step 2 — aux-LLM classification using the gate's auxiliary provider.
 
-        Returns 'safe' on any error path so YOLO failures don't paralyze
-        the agent (the operator already opted into YOLO).
+        On aux failure we default to 'risky' (ask the user) rather than 'safe'
+        — the regex pre-filter only catches ~10 canonical bad patterns, so
+        defaulting-safe turned aux outages into a silent auto-allow channel
+        for anything outside those patterns. See audit Top-10 #1.
         """
-        import re
         # Pull the most likely "command" string from the args. bash takes
         # ``command``; other tools may have different shapes — string-flatten.
         flat_args = " ".join(
             str(v) for v in tc.arguments.values() if isinstance(v, (str, int, float))
         )
         for pattern in self._YOLO_DANGER_PATTERNS:
-            if re.search(pattern, flat_args):
-                logger.warning("YOLO regex caught dangerous: %s", pattern)
+            if pattern.search(flat_args):
+                logger.warning("YOLO regex caught dangerous: %s", pattern.pattern)
                 return "dangerous"
 
         # Aux-LLM step (skipped if no provider OR breaker tripped).
         provider = getattr(self, "_aux_provider", None)
         if provider is None:
+            # No classifier wired at all. The operator consciously opted into
+            # YOLO without a shadow classifier — trust that choice and let
+            # WRITE/EXECUTE pass. DESTRUCTIVE still blocks at layer 5.
             return "safe"
         if self._yolo_breaker.is_open:
-            # Regex pre-filter already ran above — if it didn't catch this,
-            # defaulting to safe is the same thing we'd do after an aux-LLM
-            # failure anyway. Saves a round-trip + timeout per call while
-            # aux is down.
-            return "safe"
-        # Cache by (tool, args-hash) to avoid re-classifying identical calls.
-        import hashlib, json
-        cache = getattr(self, "_yolo_cache", None)
-        if cache is None:
-            cache = {}
-            self._yolo_cache = cache
-        key = hashlib.sha256(
-            f"{tc.name}::{json.dumps(tc.arguments, sort_keys=True, default=str)}".encode()
-        ).hexdigest()
+            # Aux repeatedly failed this session. Default to risky (prompt
+            # the user) instead of silently auto-allowing — the breaker must
+            # not become a bypass channel. Saves the round-trip but preserves
+            # the security surface.
+            return "risky"
+        # Cache by (tool, args-fingerprint) to avoid re-classifying identical
+        # calls. We hash a short repr (truncated 200 chars) rather than the
+        # full args — a 50KB write_file content does not need full re-hashing
+        # to find a cache hit. Bounded LRU prevents long-session OOM.
+        # Audit Top10 #10.
+        import hashlib
+        import json
+        args_repr = repr(sorted(tc.arguments.items()))[:200]
+        key = hashlib.sha256(f"{tc.name}::{args_repr}".encode()).hexdigest()
+        cache = self._yolo_cache
         if key in cache:
+            cache.move_to_end(key)  # LRU touch
             return cache[key]
 
         prompt_msgs = [
@@ -261,24 +279,30 @@ class PermissionGate:
                 classification = "safe"  # unknown = err on the side of letting
                                          # the operator proceed (they enabled YOLO)
             cache[key] = classification
+            # Bounded LRU eviction: drop oldest when over cap.
+            while len(cache) > self._yolo_cache_size:
+                cache.popitem(last=False)
             self._yolo_breaker.record_success()
             return classification
         except Exception as exc:  # noqa: BLE001
             self._yolo_breaker.record_failure()
+            exc_name = type(exc).__name__
             if self._yolo_breaker.is_open:
                 logger.warning(
-                    "YOLO shadow classifier failed: %s — breaker tripped "
-                    "after %d consecutive failures, skipping aux-LLM step "
-                    "for remainder of session (regex pre-filter still active)",
-                    exc, self._yolo_breaker.failures,
+                    "YOLO shadow classifier failed (%s) — breaker tripped "
+                    "after %d consecutive failures; subsequent WRITE/EXECUTE "
+                    "calls will prompt the user (regex pre-filter still active)",
+                    exc_name, self._yolo_breaker.failures,
                 )
             else:
                 logger.warning(
-                    "YOLO shadow classifier failed: %s — defaulting safe "
+                    "YOLO shadow classifier failed (%s) — defaulting risky "
                     "(%d/%d before breaker trips)",
-                    exc, self._yolo_breaker.failures, self._yolo_breaker.threshold,
+                    exc_name, self._yolo_breaker.failures, self._yolo_breaker.threshold,
                 )
-            return "safe"
+            # Fail-safe: default to 'risky' (prompt the user) instead of
+            # 'safe' (silent auto-allow). See audit Top-10 #1.
+            return "risky"
 
     # -- internals -----------------------------------------------------------
 

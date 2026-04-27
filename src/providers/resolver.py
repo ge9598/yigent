@@ -96,7 +96,10 @@ def resolve_provider(config: AgentConfig) -> LLMProvider:
     except Exception as exc:
         if section.fallback is None:
             raise
-        logger.warning("Primary provider failed (%s), trying fallback", exc)
+        logger.warning(
+            "Primary provider failed (%s), trying fallback",
+            type(exc).__name__,
+        )
 
     fb = section.fallback
     fb_pool = _maybe_build_pool(fb)
@@ -125,18 +128,42 @@ def resolve_auxiliary(config: AgentConfig) -> LLMProvider | None:
     # primary configs keep working without a separate aux key. Without this
     # fallback, multi-key primary configs silently disable aux (classifier,
     # compression, nudge) because aux would hit "requires API key" with no key.
-    pool = _maybe_build_pool(aux) or _maybe_build_pool(primary)
+    aux_pool = _maybe_build_pool(aux)
+    aux_single = _single_key(aux)
+    if aux_pool is None and not aux_single and primary.allow_aux_credential_fallback:
+        # Inheriting primary credentials — log once so operators notice the
+        # widened blast radius. Audit A5 / Top10 #20.
+        logger.info(
+            "Auxiliary provider has no credentials of its own; falling back "
+            "to primary credentials (allow_aux_credential_fallback=True). "
+            "Set allow_aux_credential_fallback=false in production and give "
+            "the aux a dedicated key."
+        )
+        pool = _maybe_build_pool(primary)
+        fallback_key: str = _single_key(primary)
+    else:
+        pool = aux_pool
+        fallback_key = aux_single
+    if pool is None and not fallback_key:
+        logger.info(
+            "Auxiliary provider has no credentials and fallback is disabled; "
+            "skipping aux provider initialization."
+        )
+        return None
     try:
         return _build_provider(
             name=aux.name or primary.name,
-            api_key=_single_key(aux) or _single_key(primary),
+            api_key=fallback_key,
             base_url=aux.base_url or primary.base_url,
             model=aux.model or primary.model,
             debug=debug,
             credential_pool=pool,
         )
     except Exception as exc:
-        logger.warning("Auxiliary provider failed (%s), skipping", exc)
+        logger.warning(
+            "Auxiliary provider failed (%s), skipping",
+            type(exc).__name__,
+        )
         return None
 
 

@@ -440,9 +440,11 @@ async def test_yolo_aux_classifier_risky_asks_user(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_yolo_aux_classifier_failure_defaults_safe(tmp_path) -> None:
-    """If the aux LLM blows up, YOLO falls back to allow (the operator
-    opted into YOLO; failure shouldn't paralyze them)."""
+async def test_yolo_aux_classifier_failure_defaults_risky(tmp_path) -> None:
+    """If the aux LLM blows up, YOLO falls back to 'risky' (prompt the user)
+    rather than 'safe' (silent auto-allow). See audit Top-10 #1: the regex
+    pre-filter only catches the canonical bad patterns, so defaulting-safe
+    turned aux outages into a silent auto-allow bypass for anything else."""
     reg = _make_registry(_def("bash", PermissionLevel.EXECUTE))
 
     class _BrokenAux:
@@ -453,10 +455,19 @@ async def test_yolo_aux_classifier_failure_defaults_safe(tmp_path) -> None:
     gate = PermissionGate(
         reg, _ctx(tmp_path), yolo_mode=True, aux_provider=_BrokenAux(),
     )
+    cb_called = {"n": 0}
+
+    async def _callback(tc):
+        cb_called["n"] += 1
+        return PermissionDecision.ALLOW
+
     decision = await gate.check(
         ToolCall(id="1", name="bash", arguments={"command": "ls"}),
-        _always_deny,
+        _callback,
     )
+    # 'risky' routes through the user-prompt callback — proof that we
+    # DID NOT silently auto-allow.
+    assert cb_called["n"] == 1
     assert decision == PermissionDecision.ALLOW
 
 
@@ -518,14 +529,23 @@ async def test_yolo_breaker_trips_after_threshold_failures(tmp_path) -> None:
         )
     assert call_count["n"] == 3, "first 3 calls should hit aux"
 
-    # Next calls must NOT hit the aux provider at all
+    # Next calls must NOT hit the aux provider at all. The breaker-open
+    # path now defaults to 'risky' (prompt via callback) rather than
+    # 'safe' (silent auto-allow) — see audit Top-10 #1.
+    cb_called = {"n": 0}
+
+    async def _tracking_allow(tc):
+        cb_called["n"] += 1
+        return PermissionDecision.ALLOW
+
     for i in range(3, 6):
         await gate.check(
             ToolCall(id=str(i), name="bash",
                      arguments={"command": f"cmd_{i}"}),
-            _always_allow,
+            _tracking_allow,
         )
     assert call_count["n"] == 3, "breaker should short-circuit aux after 3 failures"
+    assert cb_called["n"] == 3, "breaker-open path must prompt user, not auto-allow"
 
 
 @pytest.mark.asyncio
@@ -595,3 +615,99 @@ async def test_yolo_breaker_open_still_runs_regex(tmp_path) -> None:
         _always_allow,
     )
     assert decision == PermissionDecision.BLOCK
+
+
+# ---------------------------------------------------------------------------
+# YOLO cache LRU + key fingerprinting (audit Top10 #10)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_yolo_cache_bounded_evicts_oldest(tmp_path) -> None:
+    reg = _make_registry(_def("bash", PermissionLevel.EXECUTE))
+
+    class _Aux:
+        async def stream_message(self, **kwargs):
+            from src.providers.base import StreamChunk
+            yield StreamChunk(type="token", data="safe")
+            yield StreamChunk(type="done", data="")
+
+    gate = PermissionGate(
+        reg, _ctx(tmp_path), yolo_mode=True,
+        aux_provider=_Aux(), yolo_cache_size=4,
+    )
+
+    # Fire 6 distinct calls — cache should never exceed cap of 4
+    for i in range(6):
+        await gate.check(
+            ToolCall(id=f"c{i}", name="bash", arguments={"command": f"echo {i}"}),
+            _always_allow,
+        )
+    assert len(gate._yolo_cache) == 4
+
+
+@pytest.mark.asyncio
+async def test_yolo_cache_lru_touches_recent(tmp_path) -> None:
+    reg = _make_registry(_def("bash", PermissionLevel.EXECUTE))
+
+    class _Aux:
+        async def stream_message(self, **kwargs):
+            from src.providers.base import StreamChunk
+            yield StreamChunk(type="token", data="safe")
+            yield StreamChunk(type="done", data="")
+
+    gate = PermissionGate(
+        reg, _ctx(tmp_path), yolo_mode=True,
+        aux_provider=_Aux(), yolo_cache_size=2,
+    )
+    await gate.check(
+        ToolCall(id="a", name="bash", arguments={"command": "echo A"}), _always_allow,
+    )
+    await gate.check(
+        ToolCall(id="b", name="bash", arguments={"command": "echo B"}), _always_allow,
+    )
+    # Touch A — should now be most-recent
+    await gate.check(
+        ToolCall(id="a2", name="bash", arguments={"command": "echo A"}), _always_allow,
+    )
+    # Adding C should evict B (the LRU), not A
+    await gate.check(
+        ToolCall(id="c", name="bash", arguments={"command": "echo C"}), _always_allow,
+    )
+    # Verify A still cached but B gone
+    keys = list(gate._yolo_cache.keys())
+    assert len(keys) == 2
+    # The most-recently-inserted (C) is at the end; A should still be present
+    a_call = ToolCall(id="check", name="bash", arguments={"command": "echo A"})
+    import hashlib
+    args_repr = repr(sorted(a_call.arguments.items()))[:200]
+    a_key = hashlib.sha256(f"bash::{args_repr}".encode()).hexdigest()
+    assert a_key in gate._yolo_cache
+
+
+@pytest.mark.asyncio
+async def test_yolo_cache_fingerprint_stable_across_call_ids(tmp_path) -> None:
+    """Different ToolCall.id values for identical (name, args) must hit the same cache slot."""
+    reg = _make_registry(_def("bash", PermissionLevel.EXECUTE))
+
+    aux_calls = 0
+
+    class _Aux:
+        async def stream_message(self, **kwargs):
+            nonlocal aux_calls
+            aux_calls += 1
+            from src.providers.base import StreamChunk
+            yield StreamChunk(type="token", data="safe")
+            yield StreamChunk(type="done", data="")
+
+    gate = PermissionGate(
+        reg, _ctx(tmp_path), yolo_mode=True,
+        aux_provider=_Aux(),
+    )
+    for i in range(5):
+        await gate.check(
+            ToolCall(id=f"different-{i}", name="bash", arguments={"command": "echo same"}),
+            _always_allow,
+        )
+    # Aux must have been called only once — cache hits the rest
+    assert aux_calls == 1

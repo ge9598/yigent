@@ -84,7 +84,20 @@ async def _web_search_handler(ctx: ToolContext, query: str, num_results: int | N
         try:
             return await _tavily_search(cfg.tavily_api_key, query, max_results, timeout)
         except httpx.HTTPError as e:
-            logger.warning("Tavily failed (%s), falling back to DuckDuckGo", e)
+            # Log only the exception class (and HTTP status when available) —
+            # str(e) for httpx errors includes the request URL, which can leak
+            # query string secrets or token-bearing redirects. See audit A4/#6.
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status is not None:
+                logger.warning(
+                    "Tavily failed (%s status=%s), falling back to DuckDuckGo",
+                    type(e).__name__, status,
+                )
+            else:
+                logger.warning(
+                    "Tavily failed (%s), falling back to DuckDuckGo",
+                    type(e).__name__,
+                )
             return await _duckduckgo_search(query, timeout)
 
     return await _duckduckgo_search(query, timeout)
