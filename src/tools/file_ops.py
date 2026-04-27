@@ -34,6 +34,38 @@ def _resolve_under(ctx: ToolContext, raw_path: str) -> Path:
     wd = ctx.working_dir if ctx.working_dir is not None else Path.cwd()
     return Path(wd) / p
 
+
+def _enforce_within_working_dir(ctx: ToolContext, resolved: Path, raw_path: str) -> str | None:
+    """Block writes that escape ctx.working_dir via symlink or ``..``.
+
+    Returns an error string when the path escapes containment, ``None`` when safe.
+    Only enforced for WRITE-level tools (write_file). Reads are deliberately
+    permissive — the audit (Top10 #7) flagged write-side escape as the practical
+    risk; read-side restrictions break legitimate "read /etc/hosts" workflows.
+
+    No-op when ``ctx.working_dir`` is not set (Phase 1 / test compatibility).
+    """
+    if ctx.working_dir is None:
+        return None
+    try:
+        wd_real = Path(ctx.working_dir).resolve(strict=False)
+    except OSError:
+        return None
+    try:
+        # strict=False so we can validate paths to files that don't exist yet
+        target_real = resolved.resolve(strict=False)
+    except OSError as e:
+        return f"Error: cannot resolve {raw_path}: {type(e).__name__}"
+    try:
+        target_real.relative_to(wd_real)
+    except ValueError:
+        return (
+            f"Error: refusing to write outside working directory. "
+            f"Target {raw_path!r} resolves to {target_real}, "
+            f"which is not under {wd_real}."
+        )
+    return None
+
 # Directories to skip in traversal (both list_dir and search_files).
 _SKIP_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
@@ -126,6 +158,11 @@ async def _write_file_handler(
 ) -> str:
     def _sync() -> str:
         p = _resolve_under(ctx, path)
+        # Containment check: refuse to follow symlinks or `..` out of working_dir.
+        # No-op when working_dir is not set (legacy / tests).
+        escape_error = _enforce_within_working_dir(ctx, p, path)
+        if escape_error is not None:
+            return escape_error
         try:
             p.parent.mkdir(parents=True, exist_ok=True)
             tmp = p.with_suffix(p.suffix + ".tmp")

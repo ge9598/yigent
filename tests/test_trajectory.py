@@ -266,3 +266,78 @@ async def test_agent_loop_without_trajectory_is_unaffected():
     )
     events = [ev async for ev in gen]
     assert any(type(ev).__name__ == "FinalAnswerEvent" for ev in events)
+
+
+
+# ---------------------------------------------------------------------------
+# max_turns ring-buffer (audit B1 / Top10 #3)
+# ---------------------------------------------------------------------------
+
+
+def test_max_turns_unbounded_by_default():
+    rec = TrajectoryRecorder(session_id="s")
+    for i in range(50):
+        rec.record_turn(assistant_msg=Message(role="assistant", content=f"r{i}"))
+    assert len(rec) == 50
+    assert all(t.assistant_msg.get("role") != "trajectory_gap" for t in rec.turns)
+
+
+def test_max_turns_below_minimum_rejected():
+    with pytest.raises(ValueError, match="max_turns must be None or >= 4"):
+        TrajectoryRecorder(session_id="s", max_turns=3)
+
+
+def test_max_turns_caps_storage_with_gap_marker():
+    rec = TrajectoryRecorder(session_id="s", max_turns=4)
+    for i in range(10):
+        rec.record_turn(assistant_msg=Message(role="assistant", content=f"r{i}"))
+    assert len(rec) == 4
+    turns = rec.turns
+    # head: r0, r1; gap; tail: r9
+    assert turns[0].assistant_msg["content"] == "r0"
+    assert turns[1].assistant_msg["content"] == "r1"
+    assert turns[2].assistant_msg.get("role") == "trajectory_gap"
+    assert turns[3].assistant_msg["content"] == "r9"
+    # 10 added - 2 head - 1 tail = 7 dropped
+    assert "7 turn(s) dropped" in turns[2].assistant_msg["content"]
+
+
+def test_max_turns_no_double_marker_on_repeated_eviction():
+    rec = TrajectoryRecorder(session_id="s", max_turns=4)
+    for i in range(20):
+        rec.record_turn(assistant_msg=Message(role="assistant", content=f"r{i}"))
+    assert len(rec) == 4
+    markers = [t for t in rec.turns if t.assistant_msg.get("role") == "trajectory_gap"]
+    assert len(markers) == 1
+    assert "17 turn(s) dropped" in markers[0].assistant_msg["content"]
+
+
+def test_max_turns_just_at_threshold_no_drop():
+    rec = TrajectoryRecorder(session_id="s", max_turns=4)
+    for i in range(4):
+        rec.record_turn(assistant_msg=Message(role="assistant", content=f"r{i}"))
+    assert len(rec) == 4
+    assert all(t.assistant_msg.get("role") != "trajectory_gap" for t in rec.turns)
+
+
+def test_max_turns_sharegpt_export_includes_gap():
+    rec = TrajectoryRecorder(session_id="s", max_turns=4)
+    for i in range(10):
+        rec.record_turn(assistant_msg=Message(role="assistant", content=f"r{i}"))
+    out = rec.export_sharegpt()
+    gap_msgs = [m for m in out["conversations"] if m.get("is_gap")]
+    assert len(gap_msgs) == 1
+    assert "7 turn(s) dropped" in gap_msgs[0]["value"]
+
+
+def test_max_turns_rl_export_skips_gap():
+    rec = TrajectoryRecorder(session_id="s", max_turns=4)
+    for i in range(10):
+        rec.record_turn(
+            assistant_msg=Message(role="assistant", content=f"r{i}"),
+            tool_calls=[ToolCall(id=f"t{i}", name="noop", arguments={})],
+            tool_results=[ToolResult(tool_call_id=f"t{i}", name="noop", content="ok", is_error=False)],
+        )
+    transitions = rec.export_rl()
+    # 3 real turns retained (r0, r1, r9) — gap marker filtered out
+    assert len(transitions) == 3

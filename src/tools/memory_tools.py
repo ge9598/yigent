@@ -14,11 +14,21 @@ confirmation can also add a ``pre_tool_use`` hook returning ``ask``.
 
 from __future__ import annotations
 
+from typing import Any
+
 from src.core.types import (
     PermissionLevel, ToolContext, ToolDefinition, ToolSchema,
 )
 
 from .registry import register
+
+
+async def _await_or_call(store: Any, sync_name: str, async_name: str, *args: Any) -> Any:
+    """Call the async wrapper if the store has it (avoids blocking the loop),
+    fall back to the sync method otherwise. Audit Top10 #10."""
+    if hasattr(store, async_name):
+        return await getattr(store, async_name)(*args)
+    return getattr(store, sync_name)(*args)
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +38,7 @@ from .registry import register
 async def _list_memory_handler(ctx: ToolContext) -> str:
     if ctx.memory_store is None:
         return "Error: memory store is not configured."
-    slugs = ctx.memory_store.list_topics()
+    slugs = await _await_or_call(ctx.memory_store, "list_topics", "alist_topics")
     if not slugs:
         return "(no memory topics)"
     return "\n".join(slugs)
@@ -59,7 +69,7 @@ register(ToolDefinition(
 async def _read_memory_handler(ctx: ToolContext, topic: str) -> str:
     if ctx.memory_store is None:
         return "Error: memory store is not configured."
-    t = ctx.memory_store.read_topic(topic)
+    t = await _await_or_call(ctx.memory_store, "read_topic", "aread_topic", topic)
     if t is None:
         return f"Error: no memory topic named '{topic}'. Use list_memory to see available topics."
     return (
@@ -114,10 +124,12 @@ async def _write_memory_handler(
         return "Error: memory store is not configured."
     if not topic or not content:
         return "Error: both 'topic' and 'content' are required."
-    t = ctx.memory_store.write_topic(
-        topic, content, title=(title or topic),
+    t = await _await_or_call(
+        ctx.memory_store, "write_topic", "awrite_topic",
+        topic, content, (title or topic),
     )
-    ctx.memory_store.record_index_entry(
+    await _await_or_call(
+        ctx.memory_store, "record_index_entry", "arecord_index_entry",
         t.slug, t.title, hook or "(no hook)",
     )
     return f"Saved memory topic '{t.slug}' ({len(t.body)} chars)."
@@ -174,7 +186,7 @@ register(ToolDefinition(
 async def _delete_memory_handler(ctx: ToolContext, topic: str) -> str:
     if ctx.memory_store is None:
         return "Error: memory store is not configured."
-    ok = ctx.memory_store.delete_topic(topic)
+    ok = await _await_or_call(ctx.memory_store, "delete_topic", "adelete_topic", topic)
     return (
         f"Deleted memory topic '{topic}'." if ok
         else f"No memory topic named '{topic}' found."

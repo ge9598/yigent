@@ -20,13 +20,14 @@ Design notes:
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from src.context.circuit_breaker import CircuitBreaker
+from src.learning._aux_json import parse_aux_json
 from src.learning.nudge_prompt import (
     NUDGE_SYSTEM_PROMPT, NUDGE_USER_TEMPLATE, format_turns,
 )
@@ -39,6 +40,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class NudgeReason(str, Enum):
+    """Why a nudge run produced its outcome.
+
+    StrEnum-compatible (subclasses str) so existing comparisons against
+    string literals in tests and logs keep working. Audit C5 / Top10 #13.
+    """
+    NO_PROVIDER = "no_provider"   # aux LLM not configured
+    NO_TURNS = "no_turns"         # nothing to review yet
+    BREAKER_OPEN = "breaker_open" # aux failed too many times
+    AUX_ERROR = "aux_error"       # this run's aux call failed
+    SKIPPED = "skipped"           # parsed null / nothing worth saving
+    WRITE_ERROR = "write_error"   # memory store rejected the write
+    WROTE = "wrote"               # successfully persisted a topic
+
+
 @dataclass
 class NudgeResult:
     """Outcome of one nudge run."""
@@ -46,7 +62,7 @@ class NudgeResult:
     saved: bool
     topic: str | None = None
     hook: str | None = None
-    reason: str | None = None  # "skipped" | "wrote" | "parse_error" | "breaker_open"
+    reason: NudgeReason | None = None
 
 
 class NudgeEngine:
@@ -91,11 +107,11 @@ class NudgeEngine:
         This method does no timing logic itself so it's easy to test.
         """
         if self._provider is None:
-            return NudgeResult(saved=False, reason="no_provider")
+            return NudgeResult(saved=False, reason=NudgeReason.NO_PROVIDER)
         if self._breaker.is_open:
-            return NudgeResult(saved=False, reason="breaker_open")
+            return NudgeResult(saved=False, reason=NudgeReason.BREAKER_OPEN)
         if not turns:
-            return NudgeResult(saved=False, reason="no_turns")
+            return NudgeResult(saved=False, reason=NudgeReason.NO_TURNS)
 
         slice_turns = turns[-self.window_turns:]
         user_prompt = NUDGE_USER_TEMPLATE.format(
@@ -112,24 +128,35 @@ class NudgeEngine:
                 type(exc).__name__, exc,
                 self._breaker.failures, self._breaker.threshold,
             )
-            return NudgeResult(saved=False, reason="aux_error")
+            return NudgeResult(saved=False, reason=NudgeReason.AUX_ERROR)
 
         self._breaker.record_success()
 
         parsed = _parse_response(response_text)
         if parsed is None:
-            return NudgeResult(saved=False, reason="skipped")
+            return NudgeResult(saved=False, reason=NudgeReason.SKIPPED)
 
         topic, hook, body = parsed
         try:
-            self._memory.write_topic(topic, body, title=topic.replace("-", " "))
-            self._memory.record_index_entry(topic, topic.replace("-", " "), hook)
+            # Prefer async wrappers (Top10 #10) but fall back gracefully if a
+            # caller injects a custom store without the async surface.
+            if hasattr(self._memory, "awrite_topic"):
+                await self._memory.awrite_topic(topic, body, title=topic.replace("-", " "))
+                await self._memory.arecord_index_entry(
+                    topic, topic.replace("-", " "), hook,
+                )
+            else:
+                self._memory.write_topic(topic, body, title=topic.replace("-", " "))
+                self._memory.record_index_entry(topic, topic.replace("-", " "), hook)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Nudge memory write failed for topic %r: %s", topic, exc)
-            return NudgeResult(saved=False, reason="write_error")
+            logger.warning(
+                "Nudge memory write failed for topic %r: %s",
+                topic, type(exc).__name__,
+            )
+            return NudgeResult(saved=False, reason=NudgeReason.WRITE_ERROR)
 
         logger.info("Nudge saved topic %r (session=%s)", topic, session_id)
-        return NudgeResult(saved=True, topic=topic, hook=hook, reason="wrote")
+        return NudgeResult(saved=True, topic=topic, hook=hook, reason=NudgeReason.WROTE)
 
     async def _run_aux(self, user_prompt: str) -> str:
         """Call the aux LLM (non-streaming — accumulate token chunks)."""
@@ -154,47 +181,20 @@ class NudgeEngine:
 # Response parsing
 # ---------------------------------------------------------------------------
 
+# Tighter regex for nudge: this prompt produces simple flat objects, so we
+# can use the no-nesting variant and avoid catastrophic regex backtracking
+# on long prose responses.
 _JSON_BLOCK_RE = re.compile(r"\{[^{}]*\}", re.DOTALL)
 
 
 def _parse_response(text: str) -> tuple[str, str, str] | None:
     """Parse the aux LLM response into (topic, hook, body) or None.
 
-    Tolerates:
-    - leading/trailing whitespace
-    - a single code fence around the JSON (```json ... ```)
-    - a ``null`` response meaning "nothing worth saving"
-
-    Returns None on parse failure (caller treats as skipped).
+    Returns None when the JSON is missing, malformed, or doesn't have all
+    three required string fields.
     """
-    s = text.strip()
-    # Strip a single code fence if present.
-    if s.startswith("```"):
-        s = s.strip("`")
-        # after stripping backticks, the block may start with "json\n"
-        if s.lower().startswith("json"):
-            s = s[4:].lstrip()
-        # trailing closing fence removed already by strip("`")
-    s = s.strip()
-
-    if s == "null" or s == "":
-        return None
-
-    # Try direct JSON parse first. If that fails, grep for first balanced
-    # object (for noisy models that wrap the JSON in prose).
-    obj: Any = None
-    try:
-        obj = json.loads(s)
-    except json.JSONDecodeError:
-        m = _JSON_BLOCK_RE.search(s)
-        if m is None:
-            return None
-        try:
-            obj = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return None
-
-    if not isinstance(obj, dict):
+    obj = parse_aux_json(text, block_re=_JSON_BLOCK_RE)
+    if obj is None:
         return None
     topic = obj.get("topic")
     hook = obj.get("hook")

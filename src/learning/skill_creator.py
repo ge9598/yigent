@@ -27,11 +27,11 @@ skill-creation attempt never surfaces as a user-visible error.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import TYPE_CHECKING, Any, Literal
 
+from src.learning._aux_json import parse_aux_json
 from src.learning.skill_format import Skill
 
 if TYPE_CHECKING:
@@ -241,31 +241,11 @@ def _format_trajectory(trajectory: list["TurnRecord"]) -> str:
     return "\n".join(lines) if lines else "(empty trajectory)"
 
 
-_JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}", re.DOTALL)
-
-
 def _parse_response(text: str) -> dict[str, Any] | None:
     """Parse the aux LLM response. Tolerant of code fences and surrounding
     prose. Returns None on parse failure or explicit null."""
-    s = text.strip()
-    if s.startswith("```"):
-        s = s.strip("`")
-        if s.lower().startswith("json"):
-            s = s[4:].lstrip()
-    s = s.strip()
-    if s == "null" or s == "":
-        return None
-    try:
-        obj = json.loads(s)
-    except json.JSONDecodeError:
-        m = _JSON_BLOCK_RE.search(s)
-        if m is None:
-            return None
-        try:
-            obj = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(obj, dict):
+    obj = parse_aux_json(text)
+    if obj is None:
         return None
     required = ("slug", "name", "description", "steps")
     for field in required:

@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 # Three-tier compression thresholds (Unit 9 — ARCHITECTURE.md §I formula).
-# Subtract from model_context_window to get the actual byte budget.
+# Subtract from model_context_window to get the actual budget.
 #
 #   warn_offset      → fire budget_warning hook, suggest the user wrap up
 #   compress_offset  → run compression engine
@@ -45,6 +45,26 @@ logger = logging.getLogger(__name__)
 _WARN_OFFSET = 40_000
 _COMPRESS_OFFSET = 33_000
 _HARD_OFFSET = 23_000
+
+# Ratio caps so small-context models (8K, 16K, 32K) don't end up with negative
+# thresholds. For a 16K model, the absolute 33K compress_offset would push the
+# threshold to -17K — every assemble() would compress unconditionally, never
+# leaving room to write. We cap each offset at a fraction of the window.
+# Audit Top10 #8 / B3.
+_WARN_RATIO = 0.6      # warn at 40% capacity left
+_COMPRESS_RATIO = 0.5  # compress at 50% capacity left
+_HARD_RATIO = 0.35     # hard truncate at 65% capacity left
+
+
+def _scaled_threshold(window: int, absolute_offset: int, ratio: float) -> int:
+    """Return ``window - effective_offset``.
+
+    ``effective_offset`` is the smaller of the absolute offset and ``ratio*window``.
+    For large windows (e.g. 128K, 200K) the absolute number wins. For small
+    windows (8K, 16K) the ratio prevents the threshold from going negative.
+    """
+    effective = min(absolute_offset, int(window * ratio))
+    return window - effective
 
 
 class ContextAssembler:
@@ -88,18 +108,31 @@ class ContextAssembler:
 
     @property
     def warn_threshold(self) -> int:
-        """Tokens-used level at which budget_warning fires (~ctx-40K)."""
-        return self._model_context_window - _WARN_OFFSET
+        """Tokens-used level at which budget_warning fires.
+
+        For ctx_win >= 100K this is ``ctx - 40K``. For smaller windows the
+        offset shrinks proportionally so the threshold never goes negative.
+        """
+        return _scaled_threshold(self._model_context_window, _WARN_OFFSET, _WARN_RATIO)
 
     @property
     def compress_threshold(self) -> int:
-        """Tokens-used level at which compression engine runs (~ctx-33K)."""
-        return self._model_context_window - _COMPRESS_OFFSET
+        """Tokens-used level at which compression engine runs.
+
+        For ctx_win >= 66K this is ``ctx - 33K``. For smaller windows the
+        offset is capped at ``50% * ctx_win`` (compression triggers when
+        half the window is consumed).
+        """
+        return _scaled_threshold(self._model_context_window, _COMPRESS_OFFSET, _COMPRESS_RATIO)
 
     @property
     def hard_cutoff(self) -> int:
-        """Tokens-used level at which emergency hard truncation kicks in (~ctx-23K)."""
-        return self._model_context_window - _HARD_OFFSET
+        """Tokens-used level at which emergency hard truncation kicks in.
+
+        For ctx_win >= 66K this is ``ctx - 23K``. For smaller windows the
+        offset is capped at ``35% * ctx_win`` (hard cutoff at 65% capacity).
+        """
+        return _scaled_threshold(self._model_context_window, _HARD_OFFSET, _HARD_RATIO)
 
     @property
     def usable_budget(self) -> int:
@@ -141,7 +174,7 @@ class ContextAssembler:
                 "Only read-only tools, tool_search, ask_user, and exit_plan_mode "
                 "are available."
             )
-        memory_index = self._read_memory_index()
+        memory_index = await self._read_memory_index()
         if memory_index:
             zone3_parts.append(
                 "[Memory index — use read_memory(topic) to load any entry]\n"
@@ -241,13 +274,17 @@ class ContextAssembler:
     def _base_system_prompt_message(self) -> Message:
         return {"role": "system", "content": self._base_system_prompt}
 
-    def _read_memory_index(self) -> str:
+    async def _read_memory_index(self) -> str:
         if self._memory_store is None:
             return ""
         try:
+            # Async wrapper if available (B5/Top10 #10), else fall back to sync
+            # for stores that don't implement aread_index.
+            if hasattr(self._memory_store, "aread_index"):
+                return await self._memory_store.aread_index()
             return self._memory_store.read_index()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Memory index read failed: %s", exc)
+            logger.warning("Memory index read failed: %s", type(exc).__name__)
             return ""
 
     @staticmethod

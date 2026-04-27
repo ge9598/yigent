@@ -20,12 +20,12 @@ Rollback:
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from src.learning._aux_json import parse_aux_json
 from src.learning.skill_format import Skill, read_skill
 
 if TYPE_CHECKING:
@@ -264,29 +264,9 @@ def _rewrite_body(old_body: str, new_steps: list[str]) -> str:
     return old_body[:start] + f"\n{steps_block}\n\n" + old_body[end:]
 
 
-_JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}", re.DOTALL)
-
-
 def _parse_response(text: str) -> dict[str, Any] | None:
-    s = text.strip()
-    if s.startswith("```"):
-        s = s.strip("`")
-        if s.lower().startswith("json"):
-            s = s[4:].lstrip()
-    s = s.strip()
-    if s == "null" or s == "":
-        return None
-    try:
-        obj = json.loads(s)
-    except json.JSONDecodeError:
-        m = _JSON_BLOCK_RE.search(s)
-        if m is None:
-            return None
-        try:
-            obj = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(obj, dict):
+    obj = parse_aux_json(text)
+    if obj is None:
         return None
     steps = obj.get("steps")
     if not isinstance(steps, list) or not steps:
@@ -296,6 +276,14 @@ def _parse_response(text: str) -> dict[str, Any] | None:
 
 def _archive(skill: Skill, skills_dir: Path) -> Path:
     """Copy the skill to skills/.history/{slug}_v{version}.md."""
+    # Defense-in-depth: skill.slug is normally produced by _slugify (markdown_store.py)
+    # which strips any path-traversal characters. Guard against a future caller
+    # bypassing that by constructing a Skill directly with a raw slug. Audit A6.
+    if "/" in skill.slug or "\\" in skill.slug or ".." in skill.slug:
+        raise ValueError(
+            f"Refusing to archive skill with unsafe slug {skill.slug!r}; "
+            "slug must not contain path separators or '..'"
+        )
     history_dir = skills_dir / HISTORY_SUBDIR
     history_dir.mkdir(parents=True, exist_ok=True)
     path = history_dir / f"{skill.slug}_v{skill.version}.md"

@@ -45,6 +45,7 @@ MEMORY.md schema::
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -286,3 +287,30 @@ class MarkdownMemoryStore:
             ]
             index_path.write_text("\n".join(kept).rstrip() + "\n", encoding="utf-8")
         return True
+
+    # -- async wrappers ------------------------------------------------------
+    # Audit B5 / Top10 #10: ContextAssembler reads the memory index on every
+    # turn; tools mutate topic files inside an async event loop. Wrapping
+    # disk I/O in asyncio.to_thread keeps a slow filesystem (network mount,
+    # antivirus, contention) from stalling the loop. Sync methods above are
+    # preserved for back-compat and tests that don't need async.
+
+    async def aread_index(self) -> str:
+        return await asyncio.to_thread(self.read_index)
+
+    async def aread_topic(self, slug: str) -> Topic | None:
+        return await asyncio.to_thread(self.read_topic, slug)
+
+    async def alist_topics(self) -> list[str]:
+        return await asyncio.to_thread(self.list_topics)
+
+    async def awrite_topic(
+        self, name: str, body: str, title: str | None = None,
+    ) -> Topic:
+        return await asyncio.to_thread(self.write_topic, name, body, title)
+
+    async def adelete_topic(self, name: str) -> bool:
+        return await asyncio.to_thread(self.delete_topic, name)
+
+    async def arecord_index_entry(self, slug: str, title: str, hook: str) -> None:
+        await asyncio.to_thread(self.record_index_entry, slug, title, hook)

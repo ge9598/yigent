@@ -13,11 +13,11 @@ falls back to the rule-check channel alone.
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from src.learning._aux_json import parse_aux_json
 
 if TYPE_CHECKING:
     from src.learning.trajectory import TurnRecord
@@ -90,28 +90,40 @@ class LLMJudge:
             .replace("{execution_trace}", trace)
         )
 
-        for attempt in (1, 2):
+        # Bump temperature on retry: at temp=0, an unparseable response
+        # tends to be deterministically reproduced on the second try, so the
+        # retry buys nothing. A small bump (0.3) introduces variance without
+        # turning the judge into a coin flip. Audit B11 / Top10 #18.
+        for attempt, temperature in ((1, 0.0), (2, 0.3)):
             try:
-                response = await self._run_aux(prompt)
+                response = await self._run_aux(prompt, temperature=temperature)
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Judge aux LLM failed (attempt %d): %s", attempt, exc)
+                # Log only the exception class (audit A4) — judge prompt may
+                # quote sensitive fragments of the trajectory.
+                logger.warning(
+                    "Judge aux LLM failed (attempt %d, %s)",
+                    attempt, type(exc).__name__,
+                )
                 if attempt == 2:
-                    return JudgeResult.zero(f"aux_error: {exc}")
+                    return JudgeResult.zero(f"aux_error: {type(exc).__name__}")
                 continue
             parsed = _parse_response(response)
             if parsed is not None:
                 return parsed
-            logger.info("Judge response unparseable (attempt %d): %r", attempt, response[:200])
+            logger.info(
+                "Judge response unparseable (attempt %d, len=%d): %r",
+                attempt, len(response), response[:200],
+            )
 
         return JudgeResult.zero("unparseable response after retry")
 
-    async def _run_aux(self, prompt: str) -> str:
+    async def _run_aux(self, prompt: str, temperature: float = 0.0) -> str:
         assert self._provider is not None
         messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
         text = ""
         async for chunk in self._provider.stream_message(
             messages=messages,  # type: ignore[arg-type]
-            temperature=0.0,
+            temperature=temperature,
         ):
             if chunk.type == "token":
                 text += chunk.data
@@ -146,29 +158,9 @@ def _format_trajectory(trajectory: list["TurnRecord"]) -> str:
     return "\n".join(lines) if lines else "(empty)"
 
 
-_JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}", re.DOTALL)
-
-
 def _parse_response(text: str) -> JudgeResult | None:
-    s = text.strip()
-    if s.startswith("```"):
-        s = s.strip("`")
-        if s.lower().startswith("json"):
-            s = s[4:].lstrip()
-    s = s.strip()
-    if not s:
-        return None
-    try:
-        obj = json.loads(s)
-    except json.JSONDecodeError:
-        m = _JSON_BLOCK_RE.search(s)
-        if m is None:
-            return None
-        try:
-            obj = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(obj, dict):
+    obj = parse_aux_json(text)
+    if obj is None:
         return None
 
     def _as_score(v: Any) -> int | None:

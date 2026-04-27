@@ -100,7 +100,23 @@ async def test_write_file_relative_path_lands_in_working_dir(tmp_path: Path):
     assert "Wrote" in result
 
 
-async def test_write_file_absolute_path_passes_through(tmp_path: Path):
+async def test_write_file_absolute_path_inside_wd_succeeds(tmp_path: Path):
+    """Absolute paths that resolve under working_dir are still honored."""
+    from src.tools.file_ops import _write_file_handler
+
+    ws = tmp_path / "a"
+    ws.mkdir()
+    ctx = _ctx(ws)
+    # Absolute target that lives inside ws
+    target = ws / "sub" / "out.txt"
+    result = await _write_file_handler(ctx, path=str(target), content="x")
+
+    assert target.exists()
+    assert "Wrote" in result
+
+
+async def test_write_file_absolute_path_outside_wd_blocked(tmp_path: Path):
+    """Absolute paths that escape working_dir are now refused (audit Top10 #7)."""
     from src.tools.file_ops import _write_file_handler
 
     ws = tmp_path / "a"
@@ -109,11 +125,9 @@ async def test_write_file_absolute_path_passes_through(tmp_path: Path):
     target = tmp_path / "b" / "out.txt"
     result = await _write_file_handler(ctx, path=str(target), content="x")
 
-    # Absolute path is honored as-is and NOT nested under working_dir
-    assert target.exists()
-    # Working dir should not have grown a file
+    assert not target.exists()
     assert list(ws.iterdir()) == []
-    assert "Wrote" in result
+    assert "refusing to write outside working directory" in result
 
 
 async def test_read_file_relative_path_resolves_under_working_dir(tmp_path: Path):

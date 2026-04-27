@@ -323,16 +323,20 @@ async def test_budget_warning_hook_fires_when_warn_threshold_crossed(
     hooks.register("budget_warning", _record)
 
     fake = _ShrinkingEngine()
-    # Pick a window so warn=200, compress=300, hard=500 — a payload of
-    # ~210 tokens crosses warn but stays under compress.
+    # ctx_win small enough that ratio caps kick in: window=2000 → warn=800,
+    # compress=1000, hard=1300 (ratios 60/50/35). Payload ~810 tokens crosses
+    # warn but stays under compress.
     asm = ContextAssembler(
         system_prompt="SYS", plan_mode=plan_mode,
         compression_engine=fake,
-        model_context_window=40_200,  # warn=200, compress=7200, hard=17200
+        model_context_window=2_000,
         output_reserve=0, safety_buffer=0,
         hook_system=hooks,
     )
-    payload = "word " * 200  # ~210 tokens
+    # Confirm thresholds match expectations before constructing payload
+    assert asm.warn_threshold == 800
+    assert asm.compress_threshold == 1_000
+    payload = "word " * 850  # ~855 tokens — over warn (800), under compress (1000)
     conv = [{"role": "user", "content": payload}]
     await asm.assemble(
         tool_registry=ToolRegistry(), env_injector=env_injector,
@@ -365,11 +369,11 @@ async def test_budget_warning_does_not_fire_repeatedly_in_same_turn(
     asm = ContextAssembler(
         system_prompt="SYS", plan_mode=plan_mode,
         compression_engine=fake,
-        model_context_window=40_200,
+        model_context_window=2_000,
         output_reserve=0, safety_buffer=0,
         hook_system=hooks,
     )
-    payload = "word " * 200
+    payload = "word " * 850
     conv = [{"role": "user", "content": payload}]
     await asm.assemble(
         tool_registry=ToolRegistry(), env_injector=env_injector,
@@ -377,3 +381,48 @@ async def test_budget_warning_does_not_fire_repeatedly_in_same_turn(
     )
     # Single assemble() must not fire the hook more than once.
     assert len(fired) == 1
+
+
+
+# ---------------------------------------------------------------------------
+# Threshold scaling for small-context models (audit Top10 #8 / B3)
+# ---------------------------------------------------------------------------
+
+
+def _make_thin_assembler(window: int):
+    """Minimal ContextAssembler just to read its threshold properties."""
+    from src.context.assembler import ContextAssembler
+    from src.core.plan_mode import PlanMode
+    return ContextAssembler(
+        system_prompt="x",
+        plan_mode=PlanMode(),
+        model_context_window=window,
+    )
+
+
+@pytest.mark.parametrize("window", [8_000, 16_000, 32_000, 66_000, 128_000, 200_000])
+def test_thresholds_positive_for_all_window_sizes(window):
+    a = _make_thin_assembler(window)
+    assert 0 < a.warn_threshold < window
+    assert 0 < a.compress_threshold < window
+    assert 0 < a.hard_cutoff < window
+
+
+@pytest.mark.parametrize("window", [8_000, 16_000, 32_000, 66_000, 128_000, 200_000])
+def test_thresholds_strictly_ordered(window):
+    a = _make_thin_assembler(window)
+    assert a.warn_threshold < a.compress_threshold < a.hard_cutoff
+
+
+def test_small_window_thresholds_use_ratio_not_absolute():
+    a = _make_thin_assembler(16_000)
+    # 16K with absolute 33K compress_offset would be -17K. Ratio 50% gives 8K.
+    assert a.compress_threshold == 8_000
+
+
+def test_large_window_thresholds_use_absolute_offset():
+    a = _make_thin_assembler(200_000)
+    # 200K - 40K (warn), 200K - 33K (compress), 200K - 23K (hard)
+    assert a.warn_threshold == 160_000
+    assert a.compress_threshold == 167_000
+    assert a.hard_cutoff == 177_000

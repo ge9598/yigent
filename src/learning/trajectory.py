@@ -58,10 +58,29 @@ class TrajectoryRecorder:
     parent coordinator can merge exports post-hoc if needed.
     """
 
-    def __init__(self, session_id: str) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        max_turns: int | None = None,
+    ) -> None:
+        """
+        Args:
+            session_id: stable identifier embedded in every export.
+            max_turns: cap on retained turns. ``None`` = unbounded (default,
+                backwards compatible). When set, the recorder keeps the first
+                ``max_turns // 2`` turns and the most recent ``max_turns // 2``
+                turns; older middle turns are dropped (one synthetic
+                placeholder turn marks the gap so exports remain self-describing).
+                Audit B1: prevents OOM in long sessions / fork-heavy workflows.
+        """
+        if max_turns is not None and max_turns < 4:
+            # Below 4 we cannot meaningfully split head+tail+placeholder
+            raise ValueError("max_turns must be None or >= 4")
         self.session_id = session_id
         self._turns: list[TurnRecord] = []
         self._next_index = 0
+        self._max_turns = max_turns
+        self._dropped_count = 0
 
     # ------------------------------------------------------------------
     # Recording
@@ -89,7 +108,50 @@ class TrajectoryRecorder:
         )
         self._turns.append(record)
         self._next_index += 1
+        self._maybe_evict()
         return record
+
+    def _maybe_evict(self) -> None:
+        """Enforce max_turns by dropping middle turns (head+tail retention).
+
+        Strategy: keep ``max_turns // 2`` head turns + ``max_turns - head - 1``
+        tail turns + 1 synthetic gap marker. Once shaped, each new turn evicts
+        exactly one tail-internal turn (oldest of the tail), keeping the head
+        frozen and the marker in place.
+        """
+        if self._max_turns is None or len(self._turns) <= self._max_turns:
+            return
+        keep_head = self._max_turns // 2
+        keep_tail_count = self._max_turns - keep_head - 1
+        # Pre-existing marker means we're past the first eviction — only one new
+        # turn can have been added since the last call, so exactly one is dropped.
+        has_marker = (
+            len(self._turns) > keep_head
+            and self._turns[keep_head].assistant_msg.get("role") == "trajectory_gap"
+        )
+        if has_marker:
+            head = self._turns[:keep_head]
+            existing_marker = self._turns[keep_head]
+            tail = self._turns[-keep_tail_count:] if keep_tail_count > 0 else []
+            self._dropped_count += 1
+            existing_marker.assistant_msg["content"] = (
+                f"[{self._dropped_count} turn(s) dropped due to max_turns={self._max_turns}]"
+            )
+            self._turns = head + [existing_marker] + tail
+        else:
+            head = self._turns[:keep_head]
+            tail = self._turns[-keep_tail_count:] if keep_tail_count > 0 else []
+            dropped_now = len(self._turns) - keep_head - keep_tail_count
+            self._dropped_count += dropped_now
+            gap_marker = TurnRecord(
+                turn_index=-1,
+                timestamp=time.time(),
+                assistant_msg={
+                    "role": "trajectory_gap",
+                    "content": f"[{self._dropped_count} turn(s) dropped due to max_turns={self._max_turns}]",
+                },
+            )
+            self._turns = head + [gap_marker] + tail
 
     def attach_tool_results(self, results: list[ToolResult]) -> None:
         """Attach tool results to the most recent turn.
@@ -133,6 +195,13 @@ class TrajectoryRecorder:
         """
         conversations: list[dict[str, Any]] = []
         for turn in self._turns:
+            if turn.assistant_msg.get("role") == "trajectory_gap":
+                conversations.append({
+                    "from": "system",
+                    "value": turn.assistant_msg.get("content", ""),
+                    "is_gap": True,
+                })
+                continue
             if turn.user_msg is not None:
                 conversations.append({
                     "from": "human",
@@ -179,6 +248,9 @@ class TrajectoryRecorder:
         transitions: list[dict[str, Any]] = []
         state: list[Message] = []
         for turn in self._turns:
+            if turn.assistant_msg.get("role") == "trajectory_gap":
+                # Drop from RL state — gap markers are bookkeeping, not transitions
+                continue
             if turn.user_msg is not None:
                 state = state + [turn.user_msg]
             if turn.tool_calls:
